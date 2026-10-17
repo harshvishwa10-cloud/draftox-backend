@@ -1,0 +1,837 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum AvailabilityStatus {
+  UNKNOWN
+  COMING_SOON
+  IN_STOCK
+  OUT_OF_STOCK
+  PREORDER
+}
+
+enum OrderStatus {
+  REQUESTED
+  CONFIRMED
+  PAID
+  FAILED
+  CANCELLED
+}
+
+/**
+ * Shipment/fulfilment lifecycle, deliberately separate from OrderStatus
+ * (payment/order status). An order only leaves AWAITING_PAYMENT once payment
+ * is verified; forward-only transitions prevent fake delivery confirmations.
+ */
+enum FulfillmentStatus {
+  AWAITING_PAYMENT
+  PROCESSING
+  READY_TO_SHIP
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+/** Append-only audit trail for an order (history). */
+enum CancellationReason {
+  CHANGED_MIND
+  ORDERED_BY_MISTAKE
+  FOUND_BETTER_PRICE
+  DELIVERY_TOO_SLOW
+  DUPLICATE_ORDER
+  PAYMENT_ISSUE
+  OTHER
+}
+
+enum OrderEventType {
+  ORDER_CREATED
+  PAYMENT_VERIFIED
+  PAYMENT_FAILED
+  FULFILLMENT_CHANGED
+  SHIPMENT_UPDATED
+  ORDER_CANCELLED
+  /** Cancellation initiated by the customer (vs admin fulfilment CANCELLED). */
+  ORDER_CANCELLED_BY_CUSTOMER
+  REFUND_INITIATED
+  REFUND_UPDATED
+  REFUND_COMPLETED
+  REFUND_FAILED
+  RETURN_REQUESTED
+  RETURN_REVIEWED
+  RETURN_RESOLVED
+}
+
+/**
+ * Shipment email kinds. INITIAL is sent once, automatically, right after the
+ * first shipment details are saved. UPDATE is sent only when an admin
+ * explicitly requests a tracking update email.
+ */
+enum ShipmentNotificationType {
+  INITIAL
+  UPDATE
+}
+
+/**
+ * Delivery state of a shipment email. Emails are recorded as an outbox row
+ * (PENDING) BEFORE any send is attempted, so a failed delivery never loses the
+ * shipment and can be retried safely without duplicating the initial email.
+ */
+enum ShipmentNotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum InquiryStatus {
+  NEW
+  IN_REVIEW
+  CONTACTED
+  RESOLVED
+  CLOSED
+}
+
+/** Which public request a store-owner notification corresponds to. */
+enum InquiryKind {
+  CONTACT
+  PRODUCT
+  SUPPORT
+}
+
+/** Delivery state of a store-owner notification email (see NotificationStatus rows). */
+enum InquiryNotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+/**
+ * Lifecycle of a money refund for a cancelled or returned order that was paid
+ * and verified. REQUESTED is persisted inside the same transaction as the
+ * cancellation/return resolution before any provider work, so a crash can never
+ * lose the obligation to refund. A recovery/retry may re-claim a REQUESTED,
+ * FAILED or MANUAL_REVIEW row; SUCCESS means the provider confirmed the money
+ * moved (never the aspiration).
+ */
+enum RefundStatus {
+  REQUESTED
+  PROCESSING
+  SUCCESS
+  FAILED
+  MANUAL_REVIEW
+}
+
+enum ReturnReason {
+  DEFECTIVE
+  NOT_AS_DESCRIBED
+  DAMAGED_IN_TRANSIT
+  WRONG_ITEM
+  OTHER
+}
+
+/**
+ * Review lifecycle of a return request (post-delivery). Created SUBMITTED with
+ * customer photos, then decided by an admin. Items are only considered returned
+ * once ITEM_RECEIVED. For a paid order the refund subsystem advances
+ * REFUND_INITIATED / REFUND_COMPLETED; RESOLVED is the terminal human outcome
+ * and CLOSED a manual terminal close.
+ */
+enum ReturnStatus {
+  SUBMITTED
+  APPROVED
+  REJECTED
+  ITEM_RECEIVED
+  REFUND_INITIATED
+  REFUND_COMPLETED
+  RESOLVED
+  CLOSED
+}
+
+/**
+ * Order-lifecycle email kinds (cancellation, return submission, return
+ * decision). Mirrors ShipmentNotificationType in spirit.
+ */
+enum OrderNotificationType {
+  ORDER_CANCELLED
+  RETURN_SUBMITTED
+  RETURN_DECISION
+  /** COD order confirmed (no online payment) — sent once, right after creation. */
+  ORDER_CONFIRMED
+}
+
+/**
+ * Delivery state of an order-lifecycle email (see ShipmentNotificationStatus).
+ */
+enum OrderNotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum ContactService {
+  WEBSITE_DEVELOPMENT
+  LOGO_BRAND_IDENTITY
+  DIGITAL_PRODUCT
+  HOME_AUTOMATION
+  OTHER
+}
+
+enum BudgetRange {
+  NOT_SURE
+  UNDER_10000
+  FROM_10000_TO_25000
+  FROM_25000_TO_50000
+  FROM_50000_TO_100000
+  ABOVE_100000
+}
+
+enum ProductInquiryType {
+  PURCHASE_INTENT
+  QUESTION
+  DEMO_REQUEST
+  CUSTOM_ORDER
+  OTHER
+}
+
+model User {
+  id                  String               @id @default(cuid())
+  name                String
+  email               String               @unique
+  passwordHash        String?
+  googleId            String?              @unique
+  /**
+   * True only when a trusted identity provider (Google OAuth) reported the
+   * email as verified. Required, together with the configured admin email, for
+   * administrator access. Never set from a client-supplied value.
+   */
+  emailVerified       Boolean              @default(false)
+  role                Role                 @default(CUSTOMER)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  sessions            Session[]
+  passwordResetTokens PasswordResetToken[]
+  productInquiries    ProductInquiry[]
+  supportRequests     SupportRequest[]
+  contactInquiries    ContactInquiry[]
+  orders              Order[]
+  returnRequests      ReturnRequest[]
+  addresses           Address[]
+  cartItems           CartItem[]
+  privacyPreference   PrivacyPreference?
+  reviews             Review[]
+
+  @@index([createdAt])
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  lastUsedAt DateTime @default(now())
+  userAgent  String?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model Product {
+  id             String             @id @default(cuid())
+  slug           String             @unique
+  name           String
+  description    String
+  status         ProductStatus      @default(DRAFT)
+  price          Decimal?           @db.Decimal(12, 2)
+  /**
+   * Supplied reference/list price (strikethrough display). Null = no reference shown.
+   */
+  mrp            Decimal?           @db.Decimal(12, 2)
+  currency       String             @default("INR")
+  /**
+   * Manufacturer warranty term in whole months, shown on the catalog and
+   * snapshotted into order items at purchase time so the promise is fixed at
+   * the moment of sale. Null = not applicable / not published.
+   */
+  warrantyMonths Int?
+  /**
+   * Local photo path under public/, e.g. /images/products/draftox-16-channel.jpg
+   */
+  image          String?
+  availability   AvailabilityStatus @default(UNKNOWN)
+  specifications Json?
+  features       Json?
+  internalNotes  String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  inquiries      ProductInquiry[]
+  cartItems      CartItem[]
+
+  @@index([status])
+}
+
+model ContactInquiry {
+  id           String         @id @default(cuid())
+  userId       String?
+  user         User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name         String
+  email        String
+  businessName String?
+  service      ContactService
+  budgetRange  BudgetRange?
+  message      String
+  status       InquiryStatus  @default(NEW)
+  createdAt    DateTime       @default(now())
+
+  @@index([createdAt])
+  @@index([status])
+  @@index([email])
+  @@index([userId])
+}
+
+model ProductInquiry {
+  id           String             @id @default(cuid())
+  userId       String?
+  user         User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  productId    String
+  product      Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  customerName String
+  email        String
+  phone        String?
+  quantity     Int?
+  type         ProductInquiryType @default(PURCHASE_INTENT)
+  message      String
+  status       InquiryStatus      @default(NEW)
+  createdAt    DateTime           @default(now())
+
+  @@index([productId])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([status])
+}
+
+model SupportRequest {
+  id        String        @id @default(cuid())
+  userId    String?
+  user      User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name      String
+  contact   String
+  subject   String
+  message   String
+  status    InquiryStatus @default(NEW)
+  createdAt DateTime      @default(now())
+
+  @@index([createdAt])
+  @@index([status])
+}
+
+/**
+ * Customer order REQUEST. Created from the storefront cart with
+ * server-computed totals. An order is only a purchase once CONFIRMED by the
+ * team and PAID through a verified payment — never on browser claims.
+ */
+model Order {
+  id                String      @id @default(cuid())
+  /**
+   * Customer-facing 5-digit order number (10000–99999), stored as text so a
+   * leading zero could be preserved. Unique in the database — never derived
+   * from the internal cuid, a timestamp, a user id, or a Razorpay id.
+   */
+  orderNumber       String?     @unique
+  userId            String?
+  user              User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email             String
+  name              String
+  phone             String?
+  items             Json
+  subtotal          Decimal     @db.Decimal(12, 2)
+  amount            Decimal     @db.Decimal(12, 2)
+  currency          String      @default("INR")
+  status            OrderStatus @default(REQUESTED)
+  /**
+   * Shipment/fulfilment lifecycle — separate from `status` (payment/order
+   * status). Advanced only by an admin through the fulfilment workflow, and
+   * never beyond AWAITING_PAYMENT until payment is verified.
+   */
+  fulfillmentStatus FulfillmentStatus @default(AWAITING_PAYMENT)
+  address           Json?
+  /** Provider-reported payment instrument (e.g. upi, card, netbanking), when known. */
+  paymentMethod     String?
+  razorpayOrderId   String?     @unique
+  razorpayPaymentId String?     @unique
+  /**
+   * Client-supplied idempotency key for order creation. A retried checkout
+   * (double-tap, network retry) with the same key resolves to the first order
+   * instead of creating a duplicate. Unique when present, null for legacy rows.
+   */
+  idempotencyKey    String?     @unique
+  /**
+   * Required for a customer cancellation: the selected reason (typed enum) and
+   * an optional free-text note. Kept on the order for fast admin display; the
+   * same values are mirrored into the cancellation OrderEvent metadata.
+   */
+  cancellationReason     CancellationReason?
+  cancellationReasonNote String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  shipment          Shipment?
+  events            OrderEvent[]
+  notifications     ShipmentNotification[]
+  refund            Refund?
+  returnRequests    ReturnRequest[]
+  orderNotifications OrderNotification[]
+  review            Review?
+
+  @@index([userId])
+  @@index([status])
+  @@index([fulfillmentStatus])
+  @@index([createdAt])
+  // Customer order history and admin filtered lists always query one status
+  // column + newest-first ordering, so composite lookups beat the single-column
+  // indexes above.
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([fulfillmentStatus, createdAt])
+}
+
+/**
+ * Single-row allocator for customer-facing order numbers. The row's `value`
+ * is incremented atomically inside the order-creation transaction, so
+ * concurrent checkouts can never be handed the same number. Once the value
+ * passes 99999 the number space is exhausted and allocation fails loudly.
+ */
+model OrderCounter {
+  key   String @id
+  value Int
+}
+
+/**
+ * Courier/shipment information for an order (one shipment per order).
+ *
+ * Populated manually by an admin for now — no live courier booking is made.
+ * The customer-facing 5-digit DRAFTOX order number is intentionally NOT stored
+ * here: `trackingNumber` is the courier AWB/waybill and is kept separate from
+ * both the order number and the internal database id. A future Delhivery
+ * integration can add provider ids (see src/modules/shipping).
+ */
+model Shipment {
+  id                  String   @id @default(cuid())
+  orderId             String   @unique
+  order               Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /** Courier name, e.g. "Delhivery". Free text until a live integration exists. */
+  courierName         String?
+  /** Courier AWB / waybill number. Not the DRAFTOX order number or DB id. */
+  trackingNumber      String?
+  /** Public tracking link supplied by the courier/admin. */
+  trackingUrl         String?
+  /** Dispatch / hand-over information recorded by the admin. */
+  dispatchNotes       String?
+  /** When the shipment was created/dispatched. */
+  dispatchedAt        DateTime?
+  estimatedDeliveryAt DateTime?
+  /**
+   * VERIFIED delivery timestamp, recorded once by an admin when the shipment
+   * fulfills to DELIVERED. Return eligibility is computed from this server-side
+   * value and never from a client-supplied date. Null until actually delivered.
+   */
+  deliveredAt         DateTime?
+  /**
+   * Opaque, high-entropy bearer secret that identifies this shipment's public
+   * tracking page (/track/<token>). Generated server-side on first save from a
+   * cryptographically secure RNG; unique in the database; never derived from the
+   * order number, customer email, or internal id; and STABLE across later
+   * shipment edits (new AWB/URL never changes the link).
+   */
+  trackingToken       String?  @unique
+  /** When the tracking token was first issued (audit only). */
+  trackingTokenCreatedAt DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  notifications       ShipmentNotification[]
+
+  @@index([trackingNumber])
+}
+
+/**
+ * Outbox/audit record for a shipment email. Persisted before sending so the
+ * shipment is never lost on delivery failure, delivery state is auditable, and
+ * the INITIAL email is idempotent (a partial unique index allows at most one
+ * INITIAL row per order — see the migration).
+ */
+model ShipmentNotification {
+  id         String                     @id @default(cuid())
+  orderId    String
+  order      Order                      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  shipmentId String?
+  shipment   Shipment?                  @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+   type       ShipmentNotificationType
+   status     ShipmentNotificationStatus @default(PENDING)
+   /** Address the email was sent to (the order's stored customer email). */
+   toEmail    String
+   /**
+    * Optional client-supplied idempotency key for explicit (UPDATE) emails.
+    * Unique when present, so a repeated/retried request never sends a second
+    * copy. NULL is allowed for the automatic INITIAL row, whose uniqueness is
+    * guaranteed by the partial index on (orderId) WHERE type = 'INITIAL'.
+    */
+   idempotencyKey String?              @unique
+   /** Delivery provider used (e.g. "smtp"), or null when not configured. */
+   provider   String?
+   attempts   Int                        @default(0)
+   /** Provider-assigned message id, when reported. */
+   messageId  String?
+   /** Safe, truncated error summary (never contains credentials or PII). */
+   error      String?
+  sentAt     DateTime?
+  createdAt  DateTime                   @default(now())
+  updatedAt  DateTime                   @updatedAt
+
+  @@index([orderId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/**
+ * Append-only order history. Every lifecycle change (creation, verified
+ * payment, admin fulfilment move, shipment edit, cancellation) is recorded here
+ * with a timestamp and, for admin actions, the acting admin's id/name.
+ */
+model OrderEvent {
+  id        String         @id @default(cuid())
+  orderId   String
+  order     Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  type      OrderEventType
+  message   String?
+  /** Admin user id / display name when the change was made by an admin. */
+  actorId   String?
+  actorName String?
+  metadata  Json?
+  createdAt DateTime       @default(now())
+
+  @@index([orderId])
+  @@index([createdAt])
+  @@index([orderId, createdAt])
+}
+
+model Address {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label     String
+  line      String
+  city      String
+  state     String
+  pincode   String
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+/**
+ * Authenticated server-side cart. One row per (user, product). Prices are
+ * NEVER stored here — they are always resolved from the Product row on read,
+ * so a stale/cheated client value can never influence totals.
+ */
+model CartItem {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  slug      String
+  product   Product  @relation(fields: [slug], references: [slug], onDelete: Cascade)
+  qty       Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, slug])
+  @@index([userId])
+}
+
+/**
+ * Opt-in communication preferences per account. Marketing emails are only
+ * sent when marketingEmail is true; transactional messages (orders, shipment,
+ * support replies) are never gated behind this flag.
+ */
+model PrivacyPreference {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  marketingEmail Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+/**
+ * Money refund owed to the customer for a paid, verified order that was
+ * cancelled or returned. Created REQUESTED inside the same transaction as the
+ * cancellation/return resolution before any provider work, so a crash can never
+ * lose the obligation. Amount is always the full server-side order amount —
+ * the client never supplies ids or amounts. Only one refund per order (unique
+ * orderId), so repeated/Duplicated actions are idempotent.
+ */
+model Refund {
+  id               String       @id @default(cuid())
+  orderId          String       @unique
+  order            Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /** Full server-computed order amount, the basis of a refund. */
+  amount           Decimal      @db.Decimal(12, 2)
+  currency         String       @default("INR")
+  status           RefundStatus @default(REQUESTED)
+  /** Provider used ("razorpay" today), or null when unconfigured → MANUAL_REVIEW. */
+  provider         String?
+  /** Client/request-generated idempotency key (unique when present). */
+  idempotencyKey   String?      @unique
+  /** Provider-assigned refund id once the provider accepts the refund. */
+  providerRefundId String?      @unique
+  /** Safe, truncated error summary (never credentials or PII). */
+  error            String?
+  /** Which action started the refund: CANCEL | ADMIN | RETURN. */
+  initiatedBy      String?
+  initiatedById    String?
+  initiatedAt      DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+/**
+ * Return request (post-delivery, within the return window). One active request
+ * per order. Customer photos live privately on disk; only metadata (storedName,
+ * originalName, size, mime) is persisted here, so the JSON stays small and the
+ * DB never holds binary blobs.
+ */
+model ReturnRequest {
+  id            String       @id @default(cuid())
+  orderId       String
+  order         Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId        String?
+  user          User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  reason        ReturnReason
+  explanation   String
+  status        ReturnStatus @default(SUBMITTED)
+  /**
+   * True when the shipment has no verified delivery timestamp yet. The request
+   * is accepted but flagged for manual eligibility review by the team.
+   */
+  needsReview   Boolean      @default(false)
+  /** Photo metadata: [{ id, storedName, originalName, size, mime }]. */
+  photos        Json
+  /** Admin who made the latest decision, their note, and when. */
+  decidedBy     String?
+  decidedById   String?
+  decisionNote  String?
+  decidedAt     DateTime?
+  closedAt      DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  notifications OrderNotification[]
+
+  @@index([orderId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/**
+ * Outbox/audit record for an order-lifecycle email (cancellation, return
+ * submission, return decision), mirroring ShipmentNotification: persisted
+ * PENDING before any send attempt, so a failure is auditable, retryable and
+ * never loses the action. idempotencyKey is unique when present.
+ */
+model OrderNotification {
+  id              String                   @id @default(cuid())
+  orderId         String
+  order           Order                    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  returnRequestId String?
+  returnRequest   ReturnRequest?           @relation(fields: [returnRequestId], references: [id], onDelete: SetNull)
+  type            OrderNotificationType
+  status          OrderNotificationStatus  @default(PENDING)
+  toEmail         String
+  subject         String
+  idempotencyKey  String?                  @unique
+  provider        String?
+  attempts        Int                      @default(0)
+  messageId       String?
+  error           String?
+  sentAt          DateTime?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  @@index([orderId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/**
+ * Optional 1–5 star review of the DRAFTOX ordering experience, tied to a
+ * delivered experience but submitted right after an order is confirmed. One
+ * review per order (unique orderId). Only the order's owning signed-in user may
+ * create it — never a verified-purchase badge, since it is an ordering-
+ * experience review and COD orders are not "paid".
+ */
+model Review {
+  id        String   @id @default(cuid())
+  orderId   String   @unique
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /** Whole number 1–5. Validated at the API boundary. */
+  rating    Int
+  title     String?
+  body      String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([rating])
+  @@index([createdAt])
+}
+
+/**
+ * Outbox/audit record for a store-OWNER notification email sent when a new
+ * public request (contact enquiry, product enquiry or support request) arrives.
+ * Mirrors the ShipmentNotification/OrderNotification pattern: persisted PENDING
+ * before any send, honest delivery state, an idempotencyKey that guarantees
+ * at most one notification per request, and retryable failures.
+ */
+model InquiryNotification {
+  id             String                    @id @default(cuid())
+  kind           InquiryKind
+  /** Id of the referenced ProductInquiry / ContactInquiry / SupportRequest. */
+  refId          String
+  toEmail        String
+  subject        String
+  status         InquiryNotificationStatus @default(PENDING)
+  idempotencyKey String?                   @unique
+  provider       String?
+  attempts       Int                       @default(0)
+  messageId      String?
+  error          String?
+  sentAt         DateTime?
+  createdAt      DateTime                  @default(now())
+  updatedAt      DateTime                  @updatedAt
+
+  @@index([kind, refId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/**
+ * Durable record of every Razorpay webhook delivery we accept. The row is
+ * inserted (RECEIVED) before any processing, so a crash can never silently drop
+ * an event, and it is deduplicated on Razorpay's `x-razorpay-event-id` (falling
+ * back to a hash of the raw body) so retries of the same event are idempotent.
+ * RECEIVED/FAILED rows may be reprocessed; PROCESSED/IGNORED are terminal.
+ * Only minimal, non-sensitive fields are stored — the raw payload, which can
+ * carry customer PII, is never persisted.
+ */
+enum WebhookEventStatus {
+  RECEIVED
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+model WebhookEvent {
+  id                String             @id @default(cuid())
+  /** Dedup key: Razorpay's x-razorpay-event-id, or a SHA-256 hash of the body. */
+  eventId           String             @unique
+  eventType         String?
+  status            WebhookEventStatus @default(RECEIVED)
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  attempts          Int                @default(0)
+  /** Safe, truncated error summary (never credentials or full payloads). */
+  error             String?
+  receivedAt        DateTime           @default(now())
+  processedAt       DateTime?
+  updatedAt         DateTime           @updatedAt
+
+  @@index([status])
+  @@index([eventType])
+  @@index([razorpayOrderId])
+  @@index([receivedAt])
+}
+
+/**
+ * A payment that needs a human look: money that arrived but could not be safely
+ * applied (a payment for an unknown order, an amount/currency mismatch, a paid
+ * order that was already cancelled, or a second payment for an already-paid
+ * order), or a webhook that failed to process. Surfaced in the admin exception
+ * queue; RESOLVED rows keep their resolution note for audit. Order linkage is a
+ * plain string (no FK) so the audit trail survives an order being removed.
+ */
+enum PaymentExceptionKind {
+  UNMATCHED_PAYMENT
+  AMOUNT_MISMATCH
+  CURRENCY_MISMATCH
+  CANCELLED_PAYMENT
+  DUPLICATE_PAYMENT
+  WEBHOOK_FAILED
+  RECONCILE_FAILED
+}
+
+enum PaymentExceptionStatus {
+  OPEN
+  RESOLVED
+}
+
+model PaymentException {
+  id                String                 @id @default(cuid())
+  kind              PaymentExceptionKind
+  status            PaymentExceptionStatus @default(OPEN)
+  /** Local order id when the payment matched an order; null for strays. */
+  orderId           String?
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  amount            Decimal?               @db.Decimal(12, 2)
+  currency          String?
+  /** Human-readable summary safe for the admin UI. */
+  reason            String
+  details           Json?
+  /** Source webhook event when the exception came from one (dedup key). */
+  webhookEventId    String?                @unique
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  resolvedAt        DateTime?
+  resolvedBy        String?
+  resolutionNote    String?
+
+  @@index([status])
+  @@index([kind])
+  @@index([orderId])
+  @@index([createdAt])
+}

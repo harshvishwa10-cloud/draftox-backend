@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment files — never commit real credentials
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Uploaded files — private customer return photos (PII). Never commit.
+uploads/
+
+# Database backups / dumps — may contain customer data. Never commit.
+backups/
+*.dump
+*.dump.gpg
+*.sql
+*.sql.gz
+
+# Test / coverage
+coverage/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Prisma (client is generated)
+src/generated/
+
+# Include Prisma migration files required for deployment
+!prisma/migrations/**/migration.sql
