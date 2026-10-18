@@ -1,5 +1,5 @@
 import nodemailer from 'nodemailer';
-import { env, emailFrom, mailerConfigured, publicSiteUrl, isTest } from '../config/env.js';
+import { env, emailFrom, emailSendTimeoutMs, mailerConfigured, publicSiteUrl, isTest } from '../config/env.js';
 import { logger } from './logger.js';
 
 export interface MailResult {
@@ -191,14 +191,22 @@ function createTransport() {
       user: env.SMTP_USER,
       pass: env.SMTP_PASS ?? '',
     },
+    // Bound every stage of the SMTP round-trip. Defaults are 2 min (connect),
+    // 30s (greeting) and 10 min (socket idle) - far beyond the storefront
+    // client's 15s abort, which turned a blocked SMTP port (e.g. Render Free
+    // blocks 25/465/587 outbound) into a bogus "Could not reach the server".
+    connectionTimeout: emailSendTimeoutMs,
+    greetingTimeout: emailSendTimeoutMs,
+    socketTimeout: emailSendTimeoutMs,
   });
 }
 
 /**
  * Sends a single email. Returns a result describing what happened; NEVER throws
- * transport errors to the caller — they are captured so a failed send can never
+ * transport errors to the caller - they are captured so a failed send can never
  * break the shipment that triggered it. The caller decides how to record the
- * outcome.
+ * outcome. The attempt is bounded by EMAIL_SEND_TIMEOUT_MS (default 8s), so an
+ * unreachable SMTP host cannot hold an HTTP request past the client timeout.
  */
 export async function sendMail(input: {
   to: string;
@@ -226,13 +234,36 @@ export async function sendMail(input: {
 
   try {
     const transport = createTransport();
-    const info = await transport.sendMail({
+    const sendPromise = transport.sendMail({
       from: emailFrom,
       to: input.to,
       subject: input.subject,
       html: input.html,
       text: input.text,
     });
+    // If the race below times out, a LATE rejection of the real send must never
+    // surface as an unhandled rejection (Node would log it and, under
+    // unhandledRejection policy in index.ts, shut the server down).
+    sendPromise.catch(() => undefined);
+
+    // Hard bound on the whole attempt, independent of the per-stage transport
+    // timeouts: a blocked or hung SMTP connection (e.g. Render Free drops
+    // outbound SMTP) resolves to a truthful failure instead of holding the
+    // HTTP request open past the storefront client's 15s abort.
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`Email send timed out after ${emailSendTimeoutMs}ms.`));
+      }, emailSendTimeoutMs);
+      timer.unref?.();
+    });
+
+    let info: { accepted?: unknown; messageId?: unknown };
+    try {
+      info = await Promise.race([sendPromise, timedOut]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
 
     // `accepted`/`messageId` are provider acceptance signals, NOT delivery.
     const accepted = Array.isArray(info.accepted) && info.accepted.length > 0;

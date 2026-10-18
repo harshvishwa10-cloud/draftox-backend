@@ -116,6 +116,15 @@ export const EnvSchema = z
     // Optional override for the From header. Gmail requires From to match the
     // authenticated SMTP_USER; when unset the mailer falls back to SMTP_USER.
     EMAIL_FROM: z.string().optional(),
+    /**
+     * Hard upper bound, in milliseconds, on any single sendMail() attempt
+     * (SMTP connect + greeting + socket inactivity, plus a final race). Kept
+     * BELOW the storefront client's 15s abort (draftox web apiConfig.timeoutMs)
+     * so an unreachable SMTP host (e.g. Render Free blocks outbound SMTP ports
+     * 25/465/587) can never make a public POST hang past the browser timeout
+     * and surface as a bogus "Could not reach the server". Capped at 12s.
+     */
+    EMAIL_SEND_TIMEOUT_MS: z.coerce.number().int().min(1000).max(12000).default(8000),
     /** Customer support address shown in emails + on the tracking page. Distinct from the admin account. */
     SUPPORT_EMAIL: z.string().trim().email().default('draftoxcustomersupport@gmail.com'),
     /**
@@ -305,6 +314,13 @@ export const publicSiteUrl = (env.PUBLIC_SITE_URL ?? env.FRONTEND_URL).replace(/
 /** True only when SMTP delivery is actually configured (provider + host + user). */
 export const mailerConfigured =
   env.EMAIL_PROVIDER === 'smtp' && Boolean(env.SMTP_HOST && env.SMTP_USER);
+
+/**
+ * Upper bound on any single sendMail() attempt, in milliseconds. Must stay
+ * below the storefront's 15s request abort so a dead SMTP endpoint answers
+ * truthfully (FAILED, retryable) instead of the client timing out.
+ */
+export const emailSendTimeoutMs = env.EMAIL_SEND_TIMEOUT_MS;
 
 export const supportEmail = env.SUPPORT_EMAIL;
 
