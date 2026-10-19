@@ -130,8 +130,8 @@ Only Google-verified emails are trusted; identities are matched by Google subjec
 - On every response the server sets a readable `draftox_csrf` cookie. Echo it back as the `X-CSRF-Token` header on all `POST` requests (login included).
 - Allowed origins are configured via `CORS_ORIGINS`; wildcard + credentials is never used.
 - After `POST /auth/logout`, drop any cached user state. Sessions are invalidated server-side.
-- Password reset (dev): with `EMAIL_PROVIDER=none` the forgot-password response contains `devToken` and an honest message that no email was sent.
-- Password reset (production): with `EMAIL_PROVIDER=smtp` the forgot-password handler emails a single-use link to `<PUBLIC_SITE_URL>/reset-password?token=...`; the token is never returned in the HTTP response.
+- Password reset (email configured): with Brevo (`BREVO_API_KEY`) or SMTP (`EMAIL_PROVIDER=smtp` plus `SMTP_HOST`/`SMTP_USER`) the handler emails a single-use link to `<PUBLIC_SITE_URL>/reset-password?token=...`; the token is never returned in the HTTP response.
+- Password reset (email not configured): non-test environments (development, staging, production) never return a reset token — the endpoint responds with a safe `503` service-unavailable error. A `devToken` is returned **only** when `NODE_ENV=test` (automated tests), alongside a message that no email was sent.
 
 ## Project layout
 

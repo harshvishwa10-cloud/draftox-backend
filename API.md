@@ -117,21 +117,35 @@ Request: `{ "email": "aarav@example.com" }`
 }
 ```
 
-Development with `EMAIL_PROVIDER=none` and a known email — **no email is sent**, and the response is honest about it:
+With email delivery **not** configured, the response depends on `NODE_ENV`:
+
+`NODE_ENV=test` (automated tests only) — **no email is sent** and the token is returned for testing:
 
 ```json
 {
   "success": true,
   "data": {
-    "message": "Development mode: email delivery is not configured, so no email was sent. The reset token is returned below for local testing only.",
+    "message": "Test mode: email delivery is not configured, so no email was sent. The reset token is returned below for automated tests only.",
     "devToken": "hQ3..."
   }
 }
 ```
 
-Production without email delivery: `503`. Tokens are stored as SHA-256 hashes, expire in 1 hour, and are single-use.
+Any non-test environment (development, staging, production) — the endpoint returns a safe service-unavailable error and **never** returns a reset token:
 
-With `EMAIL_PROVIDER=smtp` configured, the reset link is emailed to the account (`<PUBLIC_SITE_URL>/reset-password?token=...`) and the response is always the generic `200` message above — the token is never returned in the response. If the mail provider rejects the send it is logged server-side and the caller still receives the generic `200` (no enumeration, no delivery leakage).
+```json
+{
+  "success": false,
+  "error": {
+    "code": "SERVICE_UNAVAILABLE",
+    "message": "Password reset is unavailable because email delivery is not configured on this server"
+  }
+}
+```
+
+Tokens are stored as SHA-256 hashes, expire in 1 hour, and are single-use.
+
+When email delivery **is** configured (Brevo `BREVO_API_KEY`, or SMTP `EMAIL_PROVIDER=smtp` with `SMTP_HOST`/`SMTP_USER`), the reset link is emailed to the account (`<PUBLIC_SITE_URL>/reset-password?token=...`) and the response is always the generic `200` message above — the token is never returned in the response. If the mail provider rejects the send it is logged server-side and the caller still receives the generic `200` (no enumeration, no delivery leakage).
 
 ### `POST /api/v1/auth/reset-password`
 

@@ -1,9 +1,9 @@
 import bcrypt from 'bcryptjs';
 import type { User } from '@prisma/client';
-import { env, isProduction, publicSiteUrl, supportEmail } from '../../config/env.js';
+import { env, isTest, publicSiteUrl, supportEmail } from '../../config/env.js';
 import { prisma } from '../../lib/prisma.js';
 import { logger } from '../../lib/logger.js';
-import { sendMail } from '../../lib/mailer.js';
+import { isMailerReady, sendMail } from '../../lib/mailer.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { generateToken, hashToken } from '../../utils/cookies.js';
 import { normalizeEmail } from '../../utils/normalize.js';
@@ -171,23 +171,30 @@ export async function forgotPassword(input: ForgotPasswordInput): Promise<Forgot
     },
   });
 
-  if (env.EMAIL_PROVIDER === 'none') {
-    if (isProduction) {
-      logger.error('password_reset_email_unavailable', { userId: user.id });
-      throw ApiError.serviceUnavailable(
-        'Password reset is unavailable because email delivery is not configured on this server',
-      );
+  // Authoritative readiness check: true when ANY transport is wired up (the
+  // Brevo HTTP API via BREVO_API_KEY, or the legacy SMTP path). This replaces
+  // the stale `EMAIL_PROVIDER === 'none'` test, which ignored Brevo entirely and
+  // therefore broke password reset (and leaked a token outside production) for a
+  // Brevo-only deployment whose EMAIL_PROVIDER was left unset/default.
+  if (!isMailerReady) {
+    logger.error('password_reset_email_unavailable', { userId: user.id });
+    // A reset token is NEVER returned to a client outside the automated test
+    // suite: production, staging and local development all receive the same
+    // generic service-unavailable response, so a token can never leak over HTTP.
+    if (isTest) {
+      logger.warn('password_reset_test_mode_no_email', { userId: user.id });
+      return {
+        message:
+          'Test mode: email delivery is not configured, so no email was sent. The reset token is returned below for automated tests only.',
+        devToken: rawToken,
+      };
     }
-    // Honest development-mode response: no email was sent; the token is returned here.
-    logger.warn('password_reset_dev_mode_no_email', { userId: user.id });
-    return {
-      message:
-        'Development mode: email delivery is not configured, so no email was sent. The reset token is returned below for local testing only.',
-      devToken: rawToken,
-    };
+    throw ApiError.serviceUnavailable(
+      'Password reset is unavailable because email delivery is not configured on this server',
+    );
   }
 
-  // SMTP delivery is configured: send the reset link. The reset token is only
+  // Email delivery is configured: send the reset link. The reset token is only
   // ever placed in the email (never in the API response), and the response stays
   // generic so it cannot be used to enumerate registered accounts.
   const resetUrl = `${publicSiteUrl}/reset-password?token=${encodeURIComponent(rawToken)}`;
