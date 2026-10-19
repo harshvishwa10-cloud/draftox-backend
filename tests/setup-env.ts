@@ -10,6 +10,10 @@ process.env.FRONTEND_URL = dotenv.FRONTEND_URL ?? 'http://localhost:3000';
 process.env.PUBLIC_SITE_URL = dotenv.PUBLIC_SITE_URL ?? 'http://localhost:3000';
 process.env.CORS_ORIGINS = dotenv.CORS_ORIGINS ?? 'http://localhost:3000';
 process.env.EMAIL_PROVIDER = 'none';
+// Keep Brevo disabled by default regardless of the developer's local .env, so
+// the mailer falls back to the EMAIL_PROVIDER=none / SMTP behavior every test
+// expects. Brevo-specific tests set BREVO_API_KEY themselves and re-import.
+process.env.BREVO_API_KEY = '';
 // Pin the admin/support identity addresses so the developer's local .env cannot
 // leak a conflicting value (e.g. SUPPORT_EMAIL = ADMIN_EMAIL) into the tests
 // that assert the admin/support separation and the shipment-email support

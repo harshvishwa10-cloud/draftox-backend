@@ -1,6 +1,6 @@
 import { isMailerReady, sendMail } from '../../lib/mailer.js';
 import { logger } from '../../lib/logger.js';
-import { isTest, ownerNotificationEmail, supportEmail } from '../../config/env.js';
+import { isTest, ownerNotificationEmail, supportEmail, brevoConfigured } from '../../config/env.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { prisma } from '../../lib/prisma.js';
 import {
@@ -111,7 +111,7 @@ export interface SendOwnerInquiryEmailParams {
 export async function sendOwnerInquiryEmail(
   params: SendOwnerInquiryEmailParams,
 ): Promise<DeliveryOutcome> {
-  const provider = isMailerReady ? 'smtp' : null;
+  const provider = isMailerReady ? (brevoConfigured ? 'brevo' : 'smtp') : null;
   const recipient = (params.mail.to ?? '').trim();
 
   let rowId: string;

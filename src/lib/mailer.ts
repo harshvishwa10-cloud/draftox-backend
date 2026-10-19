@@ -1,5 +1,15 @@
 import nodemailer from 'nodemailer';
-import { env, emailFrom, emailSendTimeoutMs, mailerConfigured, publicSiteUrl, isTest } from '../config/env.js';
+import {
+  env,
+  emailFrom,
+  emailFromAddress,
+  emailFromName,
+  emailSendTimeoutMs,
+  mailerConfigured,
+  brevoConfigured,
+  publicSiteUrl,
+  isTest,
+} from '../config/env.js';
 import { logger } from './logger.js';
 
 export interface MailResult {
@@ -11,7 +21,7 @@ export interface MailResult {
   error: string | null;
 }
 
-/** True when SMTP delivery is actually wired up in config + code. */
+/** True when any email transport (Brevo HTTP API or SMTP) is wired up. */
 export const isMailerReady = mailerConfigured;
 
 /**
@@ -27,6 +37,100 @@ export function maskEmail(address: string): string {
   return `${head}${'*'.repeat(Math.max(local.length - 1, 1))}@${domain}`;
 }
 
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
+
+/**
+ * Sends one email through Brevo's transactional email HTTP API over HTTPS.
+ * Uses native fetch (Node 18+) with a hard AbortSignal timeout — no outbound
+ * SMTP ports are touched, so this works on hosts that block SMTP (e.g. Render
+ * Free). Returns the same MailResult contract as the SMTP path. Never logs the
+ * API key, full request headers, or message content.
+ */
+async function sendViaBrevo(input: {
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+}): Promise<MailResult> {
+  const apiKey = (env.BREVO_API_KEY ?? '').trim();
+  if (!apiKey) {
+    return {
+      accepted: false,
+      messageId: null,
+      error: 'BREVO_API_KEY is not configured on the server.',
+    };
+  }
+
+  const body = {
+    sender: { email: emailFromAddress, name: emailFromName },
+    to: [{ email: input.to }],
+    subject: input.subject,
+    htmlContent: input.html,
+    textContent: input.text,
+  };
+
+  try {
+    const response = await fetch(BREVO_API_URL, {
+      method: 'POST',
+      headers: {
+        'api-key': apiKey,
+        'content-type': 'application/json',
+        accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      // Hard bound on the whole HTTP round-trip, mirroring the SMTP race.
+      signal: AbortSignal.timeout(emailSendTimeoutMs),
+    });
+
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      // Non-JSON body is fine; we only need the status code.
+    }
+
+    if (response.ok) {
+      // Brevo returns 201 with a `messageId`. That means Brevo ACCEPTED and
+      // queued the message — NOT that it reached the recipient's inbox.
+      const messageId =
+        payload && typeof payload === 'object' && 'messageId' in payload
+          ? String((payload as { messageId: unknown }).messageId)
+          : null;
+      logger.info('mail_brevo_accepted', { to: maskEmail(input.to), messageId });
+      return { accepted: true, messageId, error: null };
+    }
+
+    // Non-2xx: extract only the safe code/message fields, never the request.
+    let code: string | null = null;
+    let message: string | null = null;
+    if (payload && typeof payload === 'object') {
+      const p = payload as { code?: unknown; message?: unknown };
+      if (typeof p.code === 'string') code = p.code;
+      if (typeof p.message === 'string') message = p.message;
+    }
+    logger.warn('mail_brevo_rejected', {
+      to: maskEmail(input.to),
+      status: response.status,
+      code,
+    });
+    return {
+      accepted: false,
+      messageId: null,
+      error: `Brevo API rejected the request (HTTP ${response.status}${code ? `, ${code}` : ''})${message ? `: ${message.slice(0, 200)}` : '.'}`,
+    };
+  } catch (err) {
+    // Network failure or AbortSignal timeout. err.message is safe (contains
+    // the timeout duration or a fetch error string — never the API key).
+    const safe = err instanceof Error ? err.message : String(err);
+    logger.error('mail_brevo_failed', { to: maskEmail(input.to), error: safe });
+    return {
+      accepted: false,
+      messageId: null,
+      error: safe.slice(0, 500),
+    };
+  }
+}
+
 export interface EmailConfigCheck {
   /** Env key name. No values are ever reported — only presence. */
   key: string;
@@ -36,8 +140,8 @@ export interface EmailConfigCheck {
 }
 
 export interface EmailConfigDiagnosis {
-  provider: 'none' | 'smtp';
-  /** ready: SMTP fully present; incomplete: required SMTP keys missing; disabled: EMAIL_PROVIDER=none. */
+  provider: 'none' | 'smtp' | 'brevo';
+  /** ready: transport fully present; incomplete: required keys missing; disabled: no transport. */
   overall: 'ready' | 'incomplete' | 'disabled';
   checks: EmailConfigCheck[];
   warnings: string[];
@@ -45,12 +149,22 @@ export interface EmailConfigDiagnosis {
 
 /**
  * Reports whether email delivery is wired up — PRESENCE only, never values, so
- * it is safe to log at startup. `SMTP_PASS` and other secrets appear solely as
+ * it is safe to log at startup. `BREVO_API_KEY` and `SMTP_PASS` appear solely as
  * present/absent booleans. Used by `logEmailConfigDiagnostics()` and unit tests.
  */
 export function diagnoseEmailConfig(): EmailConfigDiagnosis {
   const checks: EmailConfigCheck[] = [];
   const warnings: string[] = [];
+
+  if (brevoConfigured) {
+    checks.push({ key: 'BREVO_API_KEY', required: true, present: true, comment: 'Brevo transactional email API configured' });
+    const from = (env.EMAIL_FROM ?? '').trim();
+    checks.push({ key: 'EMAIL_FROM', required: false, present: from.length > 0, comment: from.length > 0 ? '' : 'unset — falls back to SMTP_USER or SUPPORT_EMAIL' });
+    checks.push({ key: 'EMAIL_FROM_NAME', required: false, present: Boolean(env.EMAIL_FROM_NAME?.trim()), comment: env.EMAIL_FROM_NAME?.trim() ? '' : 'unset — defaults to "DRAFTOX"' });
+    checks.push({ key: 'OWNER_NOTIFICATION_EMAIL', required: false, present: Boolean(env.OWNER_NOTIFICATION_EMAIL?.trim()), comment: env.OWNER_NOTIFICATION_EMAIL?.trim() ? '' : 'unset — falls back to ADMIN_EMAIL' });
+    checks.push({ key: 'SUPPORT_EMAIL', required: true, present: true, comment: 'shown in the email footer' });
+    return { provider: 'brevo', overall: 'ready', checks, warnings };
+  }
 
   if (env.EMAIL_PROVIDER === 'none') {
     return {
@@ -205,8 +319,11 @@ function createTransport() {
  * Sends a single email. Returns a result describing what happened; NEVER throws
  * transport errors to the caller - they are captured so a failed send can never
  * break the shipment that triggered it. The caller decides how to record the
- * outcome. The attempt is bounded by EMAIL_SEND_TIMEOUT_MS (default 8s), so an
- * unreachable SMTP host cannot hold an HTTP request past the client timeout.
+ * outcome. The attempt is bounded by EMAIL_SEND_TIMEOUT_MS (default 8s).
+ *
+ * When BREVO_API_KEY is set, the message is routed through Brevo's transactional
+ * email HTTP API (HTTPS) — no outbound SMTP ports are used. Otherwise the
+ * legacy nodemailer SMTP path is used if EMAIL_PROVIDER=smtp is configured.
  */
 export async function sendMail(input: {
   to: string;
@@ -219,7 +336,7 @@ export async function sendMail(input: {
     return {
       accepted: false,
       messageId: null,
-      error: 'Email provider is not configured. Set EMAIL_PROVIDER=smtp and SMTP_HOST/SMTP_USER to enable sending.',
+      error: 'Email provider is not configured. Set BREVO_API_KEY (Brevo HTTP API) or EMAIL_PROVIDER=smtp with SMTP_HOST/SMTP_USER to enable sending.',
     };
   }
 
@@ -230,6 +347,11 @@ export async function sendMail(input: {
       messageId: null,
       error: 'No recipient email address was provided.',
     };
+  }
+
+  // Brevo HTTP API takes precedence when configured — no outbound SMTP is used.
+  if (brevoConfigured) {
+    return sendViaBrevo(input);
   }
 
   try {

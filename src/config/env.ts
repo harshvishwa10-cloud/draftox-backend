@@ -117,6 +117,19 @@ export const EnvSchema = z
     // authenticated SMTP_USER; when unset the mailer falls back to SMTP_USER.
     EMAIL_FROM: z.string().optional(),
     /**
+     * Brevo (transactional email HTTP API) — the primary delivery path when
+     * set. Read server-side only; never logged, committed, or exposed to the
+     * browser. When present, sendMail() routes through Brevo's HTTPS API
+     * (POST https://api.brevo.com/v3/smtp/email) instead of outbound SMTP,
+     * which Render Free blocks on ports 25/465/587.
+     */
+    BREVO_API_KEY: z.string().optional(),
+    /**
+     * Sender display name shown in the From header for outbound email
+     * (Brevo `sender.name` and the SMTP display name). Defaults to DRAFTOX.
+     */
+    EMAIL_FROM_NAME: z.string().optional(),
+    /**
      * Hard upper bound, in milliseconds, on any single sendMail() attempt
      * (SMTP connect + greeting + socket inactivity, plus a final race). Kept
      * BELOW the storefront client's 15s abort (draftox web apiConfig.timeoutMs)
@@ -311,9 +324,19 @@ export const razorpayWebhookConfigured = Boolean(env.RAZORPAY_WEBHOOK_SECRET);
  */
 export const publicSiteUrl = (env.PUBLIC_SITE_URL ?? env.FRONTEND_URL).replace(/\/+$/, '');
 
+/** True only when a Brevo API key is present (the HTTP transport path). */
+export const brevoConfigured = Boolean(env.BREVO_API_KEY?.trim());
+
 /** True only when SMTP delivery is actually configured (provider + host + user). */
-export const mailerConfigured =
+export const smtpConfigured =
   env.EMAIL_PROVIDER === 'smtp' && Boolean(env.SMTP_HOST && env.SMTP_USER);
+
+/**
+ * True when ANY email transport is wired up: the Brevo HTTP API (when
+ * BREVO_API_KEY is set) OR the legacy SMTP path. Brevo takes precedence in
+ * sendMail() when both are present.
+ */
+export const mailerConfigured = brevoConfigured || smtpConfigured;
 
 /**
  * Upper bound on any single sendMail() attempt, in milliseconds. Must stay
@@ -345,6 +368,23 @@ export const storeOrdersEnabled = env.STORE_ORDERS_ENABLED === 'true';
  * out of the box; ultimately falls back to the support address.
  */
 export const emailFrom = env.EMAIL_FROM ?? env.SMTP_USER ?? supportEmail;
+
+/** Sender display name for outbound email (Brevo `sender.name` / SMTP From name). */
+export const emailFromName = env.EMAIL_FROM_NAME?.trim() || 'DRAFTOX';
+
+/** Parses a bare email address out of a `Name <email>` or plain `email` string. */
+function parseEmailAddress(value: string): string {
+  const match = value.match(/<([^>]+)>/);
+  if (match) return match[1].trim();
+  return value.trim();
+}
+
+/**
+ * Bare sender email address (no display name) for providers that require a
+ * plain address, e.g. Brevo's `sender.email`. Derived from the same `emailFrom`
+ * resolution used for the SMTP From header.
+ */
+export const emailFromAddress = parseEmailAddress(emailFrom);
 
 /**
  * True only when the Delhivery credentials a live booking would need are

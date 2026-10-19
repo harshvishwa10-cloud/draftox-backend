@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { sendMail, isMailerReady } from '../../lib/mailer.js';
-import { publicSiteUrl, supportEmail, isTest } from '../../config/env.js';
+import { publicSiteUrl, supportEmail, isTest, brevoConfigured } from '../../config/env.js';
 import { logger } from '../../lib/logger.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { prisma } from '../../lib/prisma.js';
@@ -351,7 +351,7 @@ export async function sendInitialShipmentEmail(
     return { status: 'ALREADY_SENT', notificationId: existing.id, messageId: null, error: null };
   }
 
-  const provider = isMailerReady ? 'smtp' : null;
+  const provider = isMailerReady ? (brevoConfigured ? 'brevo' : 'smtp') : null;
   let notificationId: string;
   let isNew = false;
 
@@ -455,7 +455,7 @@ export async function sendUpdateShipmentEmail(
   shipmentId: string | null,
   idempotencyKey: string | null,
 ): Promise<DeliveryOutcome> {
-  const provider = isMailerReady ? 'smtp' : null;
+  const provider = isMailerReady ? (brevoConfigured ? 'brevo' : 'smtp') : null;
   let rowId: string;
 
   if (idempotencyKey) {
