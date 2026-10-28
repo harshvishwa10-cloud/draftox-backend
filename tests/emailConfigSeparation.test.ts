@@ -4,14 +4,19 @@ import { SUPPORT_EMAIL } from './helpers/admin.js';
 const ADMIN_EMAIL = 'draftox0@gmail.com';
 
 describe('admin account vs support/shipment sender separation', () => {
-  it('both official accounts are authorized admins when their email is verified', async () => {
-    const { effectiveRole } = await import('../src/modules/auth/authorization.js');
-    // Both configured addresses (ADMIN_EMAIL + ADMIN_EMAILS) are authorized.
+  it('only draftox0@gmail.com is an admin; the support account is never ADMIN', async () => {
+    const { effectiveRole, isAuthorizedSupport } = await import(
+      '../src/modules/auth/authorization.js'
+    );
+    // The admin account is authorised with a verified email.
     expect(effectiveRole({ email: ADMIN_EMAIL, emailVerified: true })).toBe('ADMIN');
-    expect(effectiveRole({ email: SUPPORT_EMAIL, emailVerified: true })).toBe('ADMIN');
-    // Verification is still mandatory for both.
     expect(effectiveRole({ email: ADMIN_EMAIL, emailVerified: false })).toBe('CUSTOMER');
+    // The support account is NEVER an admin, verified or not...
+    expect(effectiveRole({ email: SUPPORT_EMAIL, emailVerified: true })).toBe('CUSTOMER');
     expect(effectiveRole({ email: SUPPORT_EMAIL, emailVerified: false })).toBe('CUSTOMER');
+    // ...but IS a restricted support account once its email is verified.
+    expect(isAuthorizedSupport({ email: SUPPORT_EMAIL, emailVerified: true })).toBe(true);
+    expect(isAuthorizedSupport({ email: SUPPORT_EMAIL, emailVerified: false })).toBe(false);
   });
 
   it('config keeps admin = draftox0@gmail.com and support = draftoxcustomersupport@gmail.com as distinct addresses', async () => {

@@ -81,19 +81,30 @@ export const EnvSchema = z
     // never trusted from the client. Authorization additionally requires a
     // Google/Firebase-verified email. Kept for backward compatibility; extra
     // admins are listed in ADMIN_EMAILS and the two are combined (UNION).
-    // Do NOT point this at SUPPORT_EMAIL by replacing it — list SUPPORT_EMAIL in
-    // ADMIN_EMAILS instead so both official accounts stay explicit.
+    // Do NOT point this at SUPPORT_EMAIL by replacing it — the customer-support
+    // account is a SEPARATE, restricted role (SUPPORT_EMAILS below), never an
+    // administrator.
     ADMIN_EMAIL: z.string().trim().min(3).default('draftox0@gmail.com'),
     /**
-     * Additional authorized administrator emails, comma-separated
-     * (e.g. `draftoxcustomersupport@gmail.com`). The authorized administrator
-     * set is the UNION of `ADMIN_EMAIL` and every entry here — each entry must
-     * match EXACTLY (case-insensitively); there is no domain/prefix wildcard, so
-     * listing one address never authorizes other accounts on the same domain.
-     * Every admin still requires a Google/Firebase-verified email at request
-     * time. Empty/unset keeps the single-admin behaviour.
+     * Additional authorized administrator emails, comma-separated. The
+     * authorized administrator set is the UNION of `ADMIN_EMAIL` and every
+     * entry here — each entry must match EXACTLY (case-insensitively); there is
+     * no domain/prefix wildcard, so listing one address never authorizes other
+     * accounts on the same domain. Every admin still requires a
+     * Google/Firebase-verified email at request time. Empty/unset keeps the
+     * single-admin behaviour. The customer-support account is NOT an admin and
+     * must NOT be listed here — configure it in SUPPORT_EMAILS instead.
      */
     ADMIN_EMAILS: z.string().trim().optional(),
+    /**
+     * Restricted customer-support accounts, comma-separated. A support account
+     * is NOT an administrator: it may only read/update the public-request inbox
+     * (contact / product / support enquiries) and retry their owner
+     * notifications. Every support account must still present a
+     * provider-verified email at request time. Defaults to the official DRAFTOX
+     * support address; set to an empty string to disable the role entirely.
+     */
+    SUPPORT_EMAILS: z.string().trim().default('draftoxcustomersupport@gmail.com'),
     RAZORPAY_KEY_ID: z.string().optional(),
     RAZORPAY_KEY_SECRET: z.string().optional(),
     RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
@@ -212,6 +223,19 @@ export const EnvSchema = z
           code: z.ZodIssueCode.custom,
           path: ['ADMIN_EMAILS'],
           message: `"${trimmed}" is not a valid administrator email address`,
+        });
+      }
+    }
+
+    // Every configured support address must be a real email too.
+    for (const candidate of parseEmailList(val.SUPPORT_EMAILS)) {
+      const trimmed = candidate.trim();
+      if (!trimmed) continue;
+      if (!z.string().email().safeParse(trimmed).success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['SUPPORT_EMAILS'],
+          message: `"${trimmed}" is not a valid support email address`,
         });
       }
     }

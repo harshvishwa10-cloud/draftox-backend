@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAdmin, requireAuth } from '../../middleware/auth.js';
+import { requireAdmin, requireAuth, requireSupportOrAdmin } from '../../middleware/auth.js';
 import {
   getAdminOrder,
   listAdminOrders,
@@ -35,9 +35,27 @@ import {
 
 const router = Router();
 
-// Every admin route is gated server-side: authentication first, then the
-// ADMIN role. Hiding the page in the frontend is never the security boundary.
-router.use(requireAuth, requireAdmin);
+// Every admin route is gated server-side: authentication first, then a
+// server-derived authorization decision. Hiding the page in the frontend is
+// never the security boundary.
+router.use(requireAuth);
+
+// Public-request inbox (contact / product / support enquiries) + owner
+// notification retry — reachable by a FULL admin OR a restricted support
+// account. Declared BEFORE the full-admin gate below so these specific paths
+// are guarded by requireSupportOrAdmin and never by requireAdmin.
+router.get('/inquiries/contact', requireSupportOrAdmin, listAdminContactInquiries);
+router.patch('/inquiries/contact/:id', requireSupportOrAdmin, updateContactInquiryStatus);
+router.get('/inquiries/product', requireSupportOrAdmin, listAdminProductInquiries);
+router.patch('/inquiries/product/:id', requireSupportOrAdmin, updateProductInquiryStatus);
+router.get('/inquiries/support', requireSupportOrAdmin, listAdminSupportRequests);
+router.patch('/inquiries/support/:id', requireSupportOrAdmin, updateSupportRequestStatus);
+router.post('/inquiry-notifications/:id/retry', requireSupportOrAdmin, retryInquiryNotification);
+
+// Everything below is FULL-ADMIN only: orders, fulfillment, shipping, refunds,
+// payment exceptions/reconciliation/summary and returns. A restricted support
+// account is denied here.
+router.use(requireAdmin);
 
 router.get('/orders', listAdminOrders);
 router.get('/orders/:id', getAdminOrder);
@@ -65,16 +83,5 @@ router.get('/returns', listAdminReturns);
 router.get('/returns/:id', getAdminReturn);
 router.get('/returns/:id/photos/:photoId', getAdminReturnPhoto);
 router.patch('/returns/:id', decideAdminReturn);
-
-// Public-request inbox (contact enquiries, product enquiries, support requests).
-router.get('/inquiries/contact', listAdminContactInquiries);
-router.patch('/inquiries/contact/:id', updateContactInquiryStatus);
-router.get('/inquiries/product', listAdminProductInquiries);
-router.patch('/inquiries/product/:id', updateProductInquiryStatus);
-router.get('/inquiries/support', listAdminSupportRequests);
-router.patch('/inquiries/support/:id', updateSupportRequestStatus);
-
-// Owner-notification retry for a public request.
-router.post('/inquiry-notifications/:id/retry', retryInquiryNotification);
 
 export default router;

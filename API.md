@@ -167,15 +167,26 @@ Google redirects here with `code` + `state`. On success: session cookie set, bro
 
 Only Google-verified emails are accepted. Accounts are matched by Google subject ID, then linked by verified email, otherwise created (password hash `null`). Google tokens are never persisted.
 
-**Single administrator.** Exactly one account can ever be an administrator: the
-email in `ADMIN_EMAIL` (default `draftox0@gmail.com`) **and** only when that
-identity arrives through Google with `email_verified: true`. Authorization is
-derived from this server-side policy on every request — a row in the database
-whose `role` is `ADMIN` but whose email is anything else is **denied** (and the
-API reports its effective role as `CUSTOMER`). Password/email sign-in can never
-grant admin. The migration that introduces this policy also demotes any
-pre-existing non-authorized `ADMIN` rows to `CUSTOMER`; customer orders,
-addresses and account data are untouched.
+**Full administrator.** The full administrator is the account whose email is in
+`ADMIN_EMAIL` (default `draftox0@gmail.com`), optionally plus any extra addresses
+in the comma-separated `ADMIN_EMAILS` (the authorized set is their **union**) —
+**and** only when that identity arrives through Google/Firebase with
+`email_verified: true`. Authorization is derived from this server-side policy on
+every request — a row in the database whose `role` is `ADMIN` but whose email is
+not on the allow-list is **denied** (and the API reports its effective role as
+`CUSTOMER`). Password/email sign-in can never grant admin. The migration that
+introduced this policy also demotes any pre-existing non-authorized `ADMIN` rows
+to `CUSTOMER`; customer orders, addresses and account data are untouched.
+
+**Restricted customer-support account.** Addresses in the comma-separated
+`SUPPORT_EMAILS` (default `draftoxcustomersupport@gmail.com`) are a **separate,
+limited** role, never an administrator. A verified support account may reach
+**only** the public-request inbox — the contact / product / support enquiry
+routes and their owner-notification retry (see "Admin: public-request inbox"). It
+is **denied every other `/api/v1/admin/*` route**, including orders, fulfilment,
+shipment, refunds, payment exceptions/reconciliation/summary and returns. Setting
+`SUPPORT_EMAILS` to an empty string disables the role. Do **not** list the
+support address in `ADMIN_EMAILS` (that would make it a full admin).
 
 ### `GET /api/v1/auth/providers`
 
@@ -335,18 +346,31 @@ Query: `page` (1–1000, default 1) · `limit` (1–50, default 12) · `search` 
         "currency": "INR",
         "image": "/images/products/draftox-16-channel.jpg",
         "availability": "PREORDER",
-        "specifications": { "platform": "ESP32" },
+        "specifications": {
+          "platform": "ESP32",
+          "channels": 16,
+          "highVoltageChannels": 4,
+          "totalChannels": 20,
+          "control": "Mobile app over Wi-Fi",
+          "configuration": "Confirmed before dispatch",
+          "series": "high-voltage"
+        },
         "features": ["App control"],
         "createdAt": "2026-10-01T00:00:00.000Z",
         "updatedAt": "2026-10-01T00:00:00.000Z"
       }
     ],
-    "meta": { "page": 1, "limit": 12, "total": 3, "totalPages": 1 }
+    "meta": { "page": 1, "limit": 12, "total": 6, "totalPages": 1 }
   }
 }
 ```
 
-`price` may be `null` (not yet confirmed) — render “Contact for pricing”. `mrp` may be `null` (no reference price) — render no strikethrough. The catalog currently holds exactly 3 products (`draftox-16-channel`, `draftox-24-channel`, `draftox-40-channel`).
+`price` may be `null` (not yet confirmed) — render “Contact for pricing”. `mrp` may be `null` (no reference price) — render no strikethrough. The catalog currently holds 6 products:
+
+- Standard series: `draftox-16-channel`, `draftox-24-channel`, `draftox-40-channel`
+- High-Voltage series: `draftox-16-channel-hv4` (16 + 4), `draftox-24-channel-hv7` (24 + 7), `draftox-40-channel-hv10` (40 + 10)
+
+High-Voltage products carry extra `specifications` fields: `highVoltageChannels`, `totalChannels`, and `series: "high-voltage"`.
 
 ### `GET /api/v1/products/:slug`
 
@@ -519,17 +543,23 @@ Razorpay setup:
 
 ## Admin: order management (ADMIN role only)
 
-Every route under `/api/v1/admin/*` runs `requireAuth` then `requireAdmin`
-server-side: `401 UNAUTHENTICATED` when signed out, `403 FORBIDDEN` when the user
-is not an admin. `PATCH` routes also require the CSRF token and a JSON body. The
-frontend only hides the UI — it is never the security boundary.
+Every route under `/api/v1/admin/*` runs `requireAuth` server-side, then a
+server-derived authorization guard: `401 UNAUTHENTICATED` when signed out, `403
+FORBIDDEN` when the account is not authorized. Full-admin routes use
+`requireAdmin`; the public-request inbox routes (see below) use
+`requireSupportOrAdmin`, which also admits a verified `SUPPORT_EMAILS` account.
+A restricted support account is **denied** every order/fulfilment/shipment/
+refund/payment/returns route. `PATCH`/`POST` routes also require the CSRF token
+and a JSON body. The frontend only hides the UI — it is never the security
+boundary.
 
-No admin account is seeded. Promote an existing account against the database
-(dev/test or production, deliberately, by an operator):
-
-```sql
-UPDATE "User" SET role = 'ADMIN' WHERE email = '<admin-email>';
-```
+Authorization is by the server-side email allow-list (`ADMIN_EMAIL` +
+`ADMIN_EMAILS`) **plus** a verified email — **not** the database `role` column,
+which is inert. There is no admin account seeded and no DB row can be promoted
+into admin; to authorize an administrator, configure `ADMIN_EMAIL`/`ADMIN_EMAILS`
+(Render env) and have that account sign in with Google/Firebase. This endpoint
+group is full-admin only; the inbox routes are documented under "Admin:
+public-request inbox".
 
 **Payment status vs fulfilment.** `Order.status`
 (`REQUESTED`/`CONFIRMED`/`PAID`/`FAILED`/`CANCELLED`) is the payment/lifecycle
@@ -588,6 +618,29 @@ Body: `{ courierName?, trackingNumber?, trackingUrl?, dispatchNotes?, dispatched
 `SHIPMENT_UPDATED` event. Requires `status = PAID` and a non-cancelled order
 (`409` otherwise). **No courier is booked** — this only records admin-supplied
 details.
+
+## Admin: public-request inbox (ADMIN **or** restricted SUPPORT)
+
+These are the ONLY admin routes reachable by a restricted support account.
+Server-side guard: `requireAuth` then `requireSupportOrAdmin` — a full admin
+**or** a verified account whose email is in `SUPPORT_EMAILS` (default
+`draftoxcustomersupport@gmail.com`). `PATCH`/`POST` also require the CSRF token.
+There is no read/write access to orders, shipment, refunds, payments or returns
+for a support account.
+
+- `GET /api/v1/admin/inquiries/contact` — contact enquiries (query: `q`, `status`,
+  `limit`, `cursor`). Response `{ inquiries, nextCursor }`, each with its latest
+  `ownerNotification`.
+- `PATCH /api/v1/admin/inquiries/contact/:id` — body `{ status }` where `status ∈
+  NEW | IN_REVIEW | CONTACTED | RESOLVED | CLOSED`; `404` if the enquiry is unknown.
+- `GET /api/v1/admin/inquiries/product` — product (purchase-intent) enquiries.
+- `PATCH /api/v1/admin/inquiries/product/:id` — same body/behaviour as above.
+- `GET /api/v1/admin/inquiries/support` — support requests.
+- `PATCH /api/v1/admin/inquiries/support/:id` — same body/behaviour as above.
+- `POST /api/v1/admin/inquiry-notifications/:id/retry` — re-attempts a single
+  pending/failed owner notification for a request; `404` if unknown, otherwise
+  `{ notificationId, status, sent }` where `status` is one of `SENT | ALREADY_SENT
+  | NOT_CONFIGURED | NO_RECIPIENT | FAILED`.
 
 ## Admin: payment recovery (ADMIN role only)
 

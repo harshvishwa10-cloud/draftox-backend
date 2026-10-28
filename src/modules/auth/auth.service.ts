@@ -7,7 +7,7 @@ import { isMailerReady, sendMail } from '../../lib/mailer.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { generateToken, hashToken } from '../../utils/cookies.js';
 import { normalizeEmail } from '../../utils/normalize.js';
-import { effectiveRoleForUser, isAuthorizedAdminEmail } from './authorization.js';
+import { effectiveRoleForUser, isReservedPrivilegedEmail } from './authorization.js';
 import type { ForgotPasswordInput, LoginInput, RegisterInput, ResetPasswordInput } from '../../schemas/auth.schema.js';
 
 const BCRYPT_ROUNDS = 12;
@@ -62,12 +62,13 @@ export async function register(
 ): Promise<{ user: PublicUser; session: IssuedSession }> {
   const email = normalizeEmail(input.email);
 
-  // An authorized administrator is never a password account. Blocking password
-  // registration for a reserved admin email closes the account-pre-registration
-  // window that could otherwise let a third party create the admin row first and
-  // later have their password attached to the Google-linked admin identity.
-  // Admins sign in with Google/Firebase only.
-  if (isAuthorizedAdminEmail(email)) {
+  // A privileged account (administrator OR restricted support) is never a
+  // password account. Blocking password registration for a reserved privileged
+  // email closes the account-pre-registration window that could otherwise let a
+  // third party create the row first and later have their password attached to
+  // the provider-linked identity. Admins and support sign in with
+  // Google/Firebase only.
+  if (isReservedPrivilegedEmail(email)) {
     throw ApiError.conflict(
       'This email address cannot be registered with a password. Please sign in with Google instead.',
     );
@@ -96,9 +97,13 @@ export async function login(
   input: LoginInput,
   meta: { userAgent?: string; ip?: string },
 ): Promise<{ user: PublicUser; session: IssuedSession }> {
-  const email = normalizeEmail(input.email);
-  const user = await prisma.user.findUnique({ where: { email } });
+   const email = normalizeEmail(input.email);
 
+  if (isReservedPrivilegedEmail(email)) {
+    throw ApiError.unauthorized('Invalid email or password');
+  }
+
+  const user = await prisma.user.findUnique({ where: { email } });
   // Generic error: never reveal whether the account exists.
   if (!user || !user.passwordHash) {
     throw ApiError.unauthorized('Invalid email or password');
@@ -287,17 +292,17 @@ export async function upsertGoogleUser(identity: {
   if (byEmail) {
     // Link the Google identity to the existing account. The email came from
     // Google's verified ID token, not from the client, so this is safe.
-    // For an authorized administrator, Google is the ONLY credential: never
-    // leave a password attached, so a legacy password row (created before
-    // password registration of the admin email was blocked) cannot be used to
-    // sign in.
-    const isAdminEmail = isAuthorizedAdminEmail(email);
+    // For a privileged account (admin OR restricted support), Google is the
+    // ONLY credential: never leave a password attached, so a legacy password row
+    // (created before password registration of the privileged email was blocked)
+    // cannot be used to sign in.
+    const isPrivilegedEmail = isReservedPrivilegedEmail(email);
     const updated = await prisma.user.update({
       where: { id: byEmail.id },
       data: {
         googleId: identity.googleId,
         emailVerified: byEmail.emailVerified || emailVerified,
-        ...(isAdminEmail ? { passwordHash: null } : {}),
+        ...(isPrivilegedEmail ? { passwordHash: null } : {}),
       },
     });
     const session = await createSession(updated.id, meta);

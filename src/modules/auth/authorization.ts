@@ -70,6 +70,44 @@ export function isAuthorizedAdmin(candidate: AdminCandidate): boolean {
 }
 
 /**
+ * Every restricted customer-support email, normalized. The UNION of all
+ * `SUPPORT_EMAILS` entries (deduplicated). A support account is NOT an
+ * administrator: it may only touch the public-request inbox. Never derived from
+ * the database `role`, a frontend value, or any user-editable field.
+ */
+export const AUTHORIZED_SUPPORT_EMAILS: readonly string[] = (() => {
+  const set = new Set<string>();
+  for (const entry of parseEmailList(env.SUPPORT_EMAILS)) set.add(normalizeEmail(entry));
+  return [...set];
+})();
+
+/** True only for a configured support email (exact, case/whitespace-insensitive). */
+export function isAuthorizedSupportEmail(email: string | null | undefined): boolean {
+  if (!email) return false;
+  return AUTHORIZED_SUPPORT_EMAILS.includes(normalizeEmail(email));
+}
+
+/**
+ * True when the candidate is an authorized support account: a configured
+ * support email AND a provider-verified email. Support is deliberately a
+ * separate capability from admin (a support email is never an administrator)
+ * and grants access ONLY to the public-request inbox routes.
+ */
+export function isAuthorizedSupport(candidate: AdminCandidate): boolean {
+  return isAuthorizedSupportEmail(candidate.email) && candidate.emailVerified === true;
+}
+
+/**
+ * A privileged account that must authenticate with a provider (Google/Firebase)
+ * only: an authorized administrator OR an authorized support account. Password
+ * registration is blocked for these emails and any attached password is dropped
+ * on provider sign-in, closing the account-pre-registration window.
+ */
+export function isReservedPrivilegedEmail(email: string | null | undefined): boolean {
+  return isAuthorizedAdminEmail(email) || isAuthorizedSupportEmail(email);
+}
+
+/**
  * Firebase custom-claim administrator check. The `admin` claim is set ONLY by
  * the server (Admin SDK `setCustomUserClaims`) — a client can never forge it. To
  * keep defence-in-depth, administrator access still ALSO requires an authorized

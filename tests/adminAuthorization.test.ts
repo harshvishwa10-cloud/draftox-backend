@@ -1,35 +1,32 @@
-// Server-enforced, multi-admin authorization policy. Covers the two official
-// DRAFTOX accounts (ADMIN_EMAIL + the support account in ADMIN_EMAILS), the
-// verified-email requirement, unrelated-customer denial, forged client
-// claims/roles, exact-match (no domain wildcard) matching, and both the legacy
-// session and Firebase authentication paths.
+// Server-enforced administrator authorization policy. The ONLY full
+// administrator is draftox0@gmail.com (ADMIN_EMAIL); the customer-support
+// account (SUPPORT_EMAILS) is a restricted non-admin role. Covers the exact
+// allow-list match, the verified-email requirement, unrelated-customer denial,
+// forged client claims/roles, and both the legacy session and Firebase paths.
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { Express } from 'express';
 import { createAgent, uniqueEmail, type AgentWithCsrf } from './helpers/agent.js';
-import {
-  ADMIN_EMAIL,
-  SUPPORT_EMAIL,
-  SUPPORT_ADMIN_PASSWORD,
-  ensureAdminUser,
-  getAdminAgent,
-  getSupportAdminAgent,
-  loginAgent,
-} from './helpers/admin.js';
+import { ADMIN_EMAIL, SUPPORT_EMAIL, getAdminAgent } from './helpers/admin.js';
 
 describe('authorized-admin email set', () => {
-  it('includes exactly the two official accounts (ADMIN_EMAIL + ADMIN_EMAILS)', async () => {
-    const { AUTHORIZED_ADMIN_EMAILS } = await import('../src/modules/auth/authorization.js');
+  it('includes exactly the primary account (the support account is NOT an admin)', async () => {
+    const { AUTHORIZED_ADMIN_EMAILS, AUTHORIZED_SUPPORT_EMAILS } = await import(
+      '../src/modules/auth/authorization.js'
+    );
     expect(AUTHORIZED_ADMIN_EMAILS).toContain(ADMIN_EMAIL);
-    expect(AUTHORIZED_ADMIN_EMAILS).toContain(SUPPORT_EMAIL);
-    expect(AUTHORIZED_ADMIN_EMAILS).toHaveLength(2);
+    expect(AUTHORIZED_ADMIN_EMAILS).not.toContain(SUPPORT_EMAIL);
+    expect(AUTHORIZED_ADMIN_EMAILS).toHaveLength(1);
+    // The support account is a separate, restricted capability.
+    expect(AUTHORIZED_SUPPORT_EMAILS).toContain(SUPPORT_EMAIL);
+    expect(AUTHORIZED_SUPPORT_EMAILS).not.toContain(ADMIN_EMAIL);
   });
 
-  it('matches the configured addresses case-insensitively', async () => {
+  it('matches the configured admin address case-insensitively and never the support address', async () => {
     const { isAuthorizedAdminEmail } = await import('../src/modules/auth/authorization.js');
     expect(isAuthorizedAdminEmail(ADMIN_EMAIL)).toBe(true);
-    expect(isAuthorizedAdminEmail(SUPPORT_EMAIL)).toBe(true);
     expect(isAuthorizedAdminEmail(ADMIN_EMAIL.toUpperCase())).toBe(true);
-    expect(isAuthorizedAdminEmail(`  ${SUPPORT_EMAIL}  `)).toBe(true);
+    expect(isAuthorizedAdminEmail(`  ${ADMIN_EMAIL}  `)).toBe(true);
+    expect(isAuthorizedAdminEmail(SUPPORT_EMAIL)).toBe(false);
     expect(isAuthorizedAdminEmail('')).toBe(false);
     expect(isAuthorizedAdminEmail(null)).toBe(false);
     expect(isAuthorizedAdminEmail(undefined)).toBe(false);
@@ -53,12 +50,12 @@ describe('authorized-admin email set', () => {
     }
   });
 
-  it('requires BOTH an authorized email and a verified email', async () => {
+  it('requires BOTH an authorized admin email and a verified email', async () => {
     const { effectiveRole } = await import('../src/modules/auth/authorization.js');
     expect(effectiveRole({ email: ADMIN_EMAIL, emailVerified: true })).toBe('ADMIN');
-    expect(effectiveRole({ email: SUPPORT_EMAIL, emailVerified: true })).toBe('ADMIN');
     expect(effectiveRole({ email: ADMIN_EMAIL, emailVerified: false })).toBe('CUSTOMER');
-    expect(effectiveRole({ email: SUPPORT_EMAIL, emailVerified: false })).toBe('CUSTOMER');
+    // The support email is never ADMIN, even verified.
+    expect(effectiveRole({ email: SUPPORT_EMAIL, emailVerified: true })).toBe('CUSTOMER');
     expect(effectiveRole({ email: 'shopper@example.com', emailVerified: true })).toBe('CUSTOMER');
   });
 
@@ -66,10 +63,11 @@ describe('authorized-admin email set', () => {
     const { isFirebaseAuthorizedAdmin } = await import('../src/modules/auth/authorization.js');
     expect(isFirebaseAuthorizedAdmin({ email: 'shopper@example.com', admin: true })).toBe(false);
     expect(isFirebaseAuthorizedAdmin({ email: undefined, admin: true })).toBe(false);
+    // A claim on the support email is inert — it is not an admin address.
+    expect(isFirebaseAuthorizedAdmin({ email: SUPPORT_EMAIL, admin: true })).toBe(false);
     // The claim alone (without the authorized email) is never sufficient.
     expect(isFirebaseAuthorizedAdmin({ email: ADMIN_EMAIL, admin: false })).toBe(false);
     expect(isFirebaseAuthorizedAdmin({ email: ADMIN_EMAIL, admin: true })).toBe(true);
-    expect(isFirebaseAuthorizedAdmin({ email: SUPPORT_EMAIL, admin: true })).toBe(true);
   });
 });
 
@@ -92,9 +90,8 @@ describe('server-enforced admin access over HTTP (legacy session path)', () => {
     return { agent, csrfToken, email, userId: res.body.data.user.id as string };
   }
 
-  it('allows BOTH official accounts to reach every admin area independently', async () => {
+  it('allows the primary admin to reach every admin area', async () => {
     const primary = await getAdminAgent(app);
-    const support = await getSupportAdminAgent(app);
 
     const adminGetRoutes = [
       '/api/v1/admin/orders',
@@ -108,18 +105,13 @@ describe('server-enforced admin access over HTTP (legacy session path)', () => {
     ];
 
     for (const route of adminGetRoutes) {
-      expect((await primary.agent.get(route)).status, `primary ${route}`).toBe(200);
-      // The support account never impersonates the primary account: it uses its
-      // own separate session and is authorized on its own.
-      expect((await support.agent.get(route)).status, `support ${route}`).toBe(200);
+      expect((await primary.agent.get(route)).status, route).toBe(200);
     }
   });
 
-  it('reports the ADMIN role for both accounts on /auth/me', async () => {
+  it('reports the ADMIN role for the primary account on /auth/me', async () => {
     const primary = await getAdminAgent(app);
-    const support = await getSupportAdminAgent(app);
     expect((await primary.agent.get('/api/v1/auth/me')).body.data.user.role).toBe('ADMIN');
-    expect((await support.agent.get('/api/v1/auth/me')).body.data.user.role).toBe('ADMIN');
   });
 
   it('403s an ordinary customer on admin routes and keeps them a customer', async () => {
@@ -134,6 +126,7 @@ describe('server-enforced admin access over HTTP (legacy session path)', () => {
   it('401s a guest (no session) on every admin route', async () => {
     const { agent } = await createAgent(app);
     expect((await agent.get('/api/v1/admin/orders')).status).toBe(401);
+    expect((await agent.get('/api/v1/admin/inquiries/contact')).status).toBe(401);
   });
 
   it('denies a customer whose raw DB role was forged to ADMIN', async () => {
@@ -144,18 +137,5 @@ describe('server-enforced admin access over HTTP (legacy session path)', () => {
     expect((await customer.agent.get('/api/v1/admin/orders')).status).toBe(403);
     const me = await customer.agent.get('/api/v1/auth/me');
     expect(me.body.data.user.role).toBe('CUSTOMER');
-  });
-
-  it('denies an authorized email while its email is unverified (legacy path)', async () => {
-    const { prisma } = await import('../src/lib/prisma.js');
-    await ensureAdminUser(SUPPORT_EMAIL, undefined, SUPPORT_ADMIN_PASSWORD);
-    await prisma.user.update({ where: { email: SUPPORT_EMAIL }, data: { emailVerified: false } });
-    try {
-      const support = await loginAgent(app, SUPPORT_EMAIL, SUPPORT_ADMIN_PASSWORD);
-      expect((await support.agent.get('/api/v1/auth/me')).body.data.user.role).toBe('CUSTOMER');
-      expect((await support.agent.get('/api/v1/admin/orders')).status).toBe(403);
-    } finally {
-      await prisma.user.update({ where: { email: SUPPORT_EMAIL }, data: { emailVerified: true } });
-    }
   });
 });

@@ -26,7 +26,12 @@ import { prisma } from '../../lib/prisma.js';
 import { logger } from '../../lib/logger.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { normalizeEmail } from '../../utils/normalize.js';
-import { effectiveRole, isAuthorizedAdmin, isAuthorizedAdminEmail } from './authorization.js';
+import {
+  effectiveRole,
+  isAuthorizedAdmin,
+  isAuthorizedAdminEmail,
+  isReservedPrivilegedEmail,
+} from './authorization.js';
 import { toPublicUser, type PublicUser } from './auth.service.js';
 
 export interface FirebaseSessionResult {
@@ -45,6 +50,8 @@ export interface ResolvedFirebaseUser {
   name: string;
   role: 'CUSTOMER' | 'ADMIN';
   emailVerified: boolean;
+  /** Verified in THIS signed session cookie (the strict privilege signal). */
+  providerVerified: boolean;
   authSource: 'firebase';
 }
 
@@ -88,7 +95,7 @@ async function upsertUserForIdentity(identity: {
   name?: string;
 }): Promise<User> {
   const existing = await prisma.user.findUnique({ where: { email: identity.email } });
-  const isAdminEmail = isAuthorizedAdminEmail(identity.email);
+  const isPrivilegedEmail = isReservedPrivilegedEmail(identity.email);
 
   if (existing) {
     return prisma.user.update({
@@ -96,9 +103,10 @@ async function upsertUserForIdentity(identity: {
       data: {
         emailVerified: existing.emailVerified || identity.emailVerified,
         // Firebase email/password or Google accounts are not password accounts on
-        // DRAFTOX. For an authorized admin email, never leave a password attached
-        // (Firebase is the only credential), mirroring the Google OAuth rule.
-        ...(isAdminEmail ? { passwordHash: null } : {}),
+        // DRAFTOX. For an authorized admin OR support email, never leave a
+        // password attached (the provider is the only credential), mirroring the
+        // Google OAuth rule and closing the pre-registration window.
+        ...(isPrivilegedEmail ? { passwordHash: null } : {}),
       },
     });
   }
@@ -218,6 +226,7 @@ export async function resolveUserFromSessionCookie(
     name: user.name,
     role: admin ? 'ADMIN' : 'CUSTOMER',
     emailVerified: user.emailVerified || emailVerified,
+    providerVerified: emailVerified,
     authSource: 'firebase',
   };
 }

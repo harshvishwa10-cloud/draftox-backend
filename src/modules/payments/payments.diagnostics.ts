@@ -69,7 +69,7 @@ export function diagnosePaymentsConfig(): PaymentsConfigDiagnosis {
       warnings: [
         'Razorpay is NOT configured (missing RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET) — ' +
           'the checkout stays disabled and order creation returns 503. ' +
-          'Set both keys to enable test-mode payments (see .env.example).',
+          'Set both keys to enable online payments (see .env.example).',
         ...(razorpayWebhookConfigured
           ? [
               'RAZORPAY_WEBHOOK_SECRET is set but the keys are not; webhooks cannot be ' +

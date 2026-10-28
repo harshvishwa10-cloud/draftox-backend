@@ -1,0 +1,265 @@
+﻿diff --git a/src/config/env.ts b/src/config/env.ts
+index 100d88f..b062f4d 100644
+--- a/src/config/env.ts
++++ b/src/config/env.ts
+@@ -81,19 +81,30 @@ export const EnvSchema = z
+     // never trusted from the client. Authorization additionally requires a
+     // Google/Firebase-verified email. Kept for backward compatibility; extra
+     // admins are listed in ADMIN_EMAILS and the two are combined (UNION).
+-    // Do NOT point this at SUPPORT_EMAIL by replacing it ΓÇö list SUPPORT_EMAIL in
+-    // ADMIN_EMAILS instead so both official accounts stay explicit.
++    // Do NOT point this at SUPPORT_EMAIL by replacing it ΓÇö the customer-support
++    // account is a SEPARATE, restricted role (SUPPORT_EMAILS below), never an
++    // administrator.
+     ADMIN_EMAIL: z.string().trim().min(3).default('draftox0@gmail.com'),
+     /**
+-     * Additional authorized administrator emails, comma-separated
+-     * (e.g. `draftoxcustomersupport@gmail.com`). The authorized administrator
+-     * set is the UNION of `ADMIN_EMAIL` and every entry here ΓÇö each entry must
+-     * match EXACTLY (case-insensitively); there is no domain/prefix wildcard, so
+-     * listing one address never authorizes other accounts on the same domain.
+-     * Every admin still requires a Google/Firebase-verified email at request
+-     * time. Empty/unset keeps the single-admin behaviour.
++     * Additional authorized administrator emails, comma-separated. The
++     * authorized administrator set is the UNION of `ADMIN_EMAIL` and every
++     * entry here ΓÇö each entry must match EXACTLY (case-insensitively); there is
++     * no domain/prefix wildcard, so listing one address never authorizes other
++     * accounts on the same domain. Every admin still requires a
++     * Google/Firebase-verified email at request time. Empty/unset keeps the
++     * single-admin behaviour. The customer-support account is NOT an admin and
++     * must NOT be listed here ΓÇö configure it in SUPPORT_EMAILS instead.
+      */
+     ADMIN_EMAILS: z.string().trim().optional(),
++    /**
++     * Restricted customer-support accounts, comma-separated. A support account
++     * is NOT an administrator: it may only read/update the public-request inbox
++     * (contact / product / support enquiries) and retry their owner
++     * notifications. Every support account must still present a
++     * provider-verified email at request time. Defaults to the official DRAFTOX
++     * support address; set to an empty string to disable the role entirely.
++     */
++    SUPPORT_EMAILS: z.string().trim().default('draftoxcustomersupport@gmail.com'),
+     RAZORPAY_KEY_ID: z.string().optional(),
+     RAZORPAY_KEY_SECRET: z.string().optional(),
+     RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
+@@ -216,6 +227,19 @@ export const EnvSchema = z
+       }
+     }
+ 
++    // Every configured support address must be a real email too.
++    for (const candidate of parseEmailList(val.SUPPORT_EMAILS)) {
++      const trimmed = candidate.trim();
++      if (!trimmed) continue;
++      if (!z.string().email().safeParse(trimmed).success) {
++        ctx.addIssue({
++          code: z.ZodIssueCode.custom,
++          path: ['SUPPORT_EMAILS'],
++          message: `"${trimmed}" is not a valid support email address`,
++        });
++      }
++    }
++
+     const googlePieces: Array<[string, string | undefined]> = [
+       ['GOOGLE_CLIENT_ID', val.GOOGLE_CLIENT_ID],
+       ['GOOGLE_CLIENT_SECRET', val.GOOGLE_CLIENT_SECRET],
+diff --git a/src/middleware/auth.ts b/src/middleware/auth.ts
+index 8c6ef6e..8ee16a8 100644
+--- a/src/middleware/auth.ts
++++ b/src/middleware/auth.ts
+@@ -8,7 +8,7 @@ import {
+   clearSessionCookie,
+   hashToken,
+ } from '../utils/cookies.js';
+-import { isAuthorizedAdmin } from '../modules/auth/authorization.js';
++import { isAuthorizedAdmin, isAuthorizedSupport } from '../modules/auth/authorization.js';
+ import { resolveUserFromSessionCookie } from '../modules/auth/firebase.service.js';
+ 
+ export interface AuthenticatedUser {
+@@ -16,8 +16,15 @@ export interface AuthenticatedUser {
+   email: string;
+   name: string;
+   role: 'CUSTOMER' | 'ADMIN';
+-  /** True only when a trusted provider (Google) verified the email. */
++  /** Persisted provider-verification flag for the account (may be stale). */
+   emailVerified: boolean;
++  /**
++   * True only when THIS request's own credential (the signed Firebase session
++   * cookie or the legacy session) proves a provider-verified email. Privilege
++   * checks (admin/support) use this strict signal, never the persisted flag or a
++   * possibly-stale custom claim.
++   */
++  providerVerified: boolean;
+   /**
+    * Which mechanism authenticated this request. Both `firebase` and `session`
+    * resolve their effective role from the authorized-admin email allow-list +
+@@ -79,7 +86,13 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
+       throw ApiError.unauthorized('Session expired, please sign in again');
+     }
+ 
+-    req.user = session.user;
++    req.user = {
++      ...session.user,
++      authSource: 'session',
++      // For a legacy session the persisted flag IS the provider-verification
++      // proof (it is only ever set by a verified Google/Firebase sign-in).
++      providerVerified: session.user.emailVerified,
++    };
+ 
+     // Refresh lastUsedAt opportunistically (do not block the request on failure)
+     prisma.session
+@@ -116,7 +129,11 @@ export const optionalAuth: RequestHandler = async (req, _res, next) => {
+       },
+     });
+     if (session && session.expiresAt.getTime() > Date.now()) {
+-      req.user = session.user;
++      req.user = {
++        ...session.user,
++        authSource: 'session',
++        providerVerified: session.user.emailVerified,
++      };
+     }
+     next();
+   } catch (err) {
+@@ -152,3 +169,35 @@ export const requireAdmin: RequestHandler = (req, _res, next) => {
+   }
+   next();
+ };
++
++/**
++ * Restricted public-request-inbox gate. Must be mounted AFTER `requireAuth` so
++ * `req.user` is set. It passes for a FULL administrator (exactly like
++ * `requireAdmin`) OR for a configured support account that presented a
++ * provider-verified email in THIS request's credential. It is deliberately used
++ * ONLY for the contact/product/support enquiry inbox and the owner-notification
++ * retry ΓÇö every financial, order, shipment, refund, payment and returns route
++ * stays behind the full-admin `requireAdmin` gate.
++ */
++export const requireSupportOrAdmin: RequestHandler = (req, _res, next) => {
++  if (!req.user) {
++    next(ApiError.unauthorized());
++    return;
++  }
++  const isAdmin =
++    req.user.authSource === 'firebase'
++      ? req.user.role === 'ADMIN'
++      : isAuthorizedAdmin(req.user);
++  if (isAdmin) {
++    next();
++    return;
++  }
++  // Support: authorized email + a provider-verified email proven by THIS
++  // request's credential (the strict `providerVerified` signal, not the looser
++  // persisted column and not a client-supplied value).
++  if (isAuthorizedSupport({ email: req.user.email, emailVerified: req.user.providerVerified })) {
++    next();
++    return;
++  }
++  next(ApiError.forbidden('Support or admin access is required for this resource'));
++};
+diff --git a/src/modules/admin/admin.routes.ts b/src/modules/admin/admin.routes.ts
+index 085969a..89769c3 100644
+--- a/src/modules/admin/admin.routes.ts
++++ b/src/modules/admin/admin.routes.ts
+@@ -1,5 +1,5 @@
+ import { Router } from 'express';
+-import { requireAdmin, requireAuth } from '../../middleware/auth.js';
++import { requireAdmin, requireAuth, requireSupportOrAdmin } from '../../middleware/auth.js';
+ import {
+   getAdminOrder,
+   listAdminOrders,
+@@ -35,9 +35,27 @@ import {
+ 
+ const router = Router();
+ 
+-// Every admin route is gated server-side: authentication first, then the
+-// ADMIN role. Hiding the page in the frontend is never the security boundary.
+-router.use(requireAuth, requireAdmin);
++// Every admin route is gated server-side: authentication first, then a
++// server-derived authorization decision. Hiding the page in the frontend is
++// never the security boundary.
++router.use(requireAuth);
++
++// Public-request inbox (contact / product / support enquiries) + owner
++// notification retry ΓÇö reachable by a FULL admin OR a restricted support
++// account. Declared BEFORE the full-admin gate below so these specific paths
++// are guarded by requireSupportOrAdmin and never by requireAdmin.
++router.get('/inquiries/contact', requireSupportOrAdmin, listAdminContactInquiries);
++router.patch('/inquiries/contact/:id', requireSupportOrAdmin, updateContactInquiryStatus);
++router.get('/inquiries/product', requireSupportOrAdmin, listAdminProductInquiries);
++router.patch('/inquiries/product/:id', requireSupportOrAdmin, updateProductInquiryStatus);
++router.get('/inquiries/support', requireSupportOrAdmin, listAdminSupportRequests);
++router.patch('/inquiries/support/:id', requireSupportOrAdmin, updateSupportRequestStatus);
++router.post('/inquiry-notifications/:id/retry', requireSupportOrAdmin, retryInquiryNotification);
++
++// Everything below is FULL-ADMIN only: orders, fulfillment, shipping, refunds,
++// payment exceptions/reconciliation/summary and returns. A restricted support
++// account is denied here.
++router.use(requireAdmin);
+ 
+ router.get('/orders', listAdminOrders);
+ router.get('/orders/:id', getAdminOrder);
+@@ -66,15 +84,4 @@ router.get('/returns/:id', getAdminReturn);
+ router.get('/returns/:id/photos/:photoId', getAdminReturnPhoto);
+ router.patch('/returns/:id', decideAdminReturn);
+ 
+-// Public-request inbox (contact enquiries, product enquiries, support requests).
+-router.get('/inquiries/contact', listAdminContactInquiries);
+-router.patch('/inquiries/contact/:id', updateContactInquiryStatus);
+-router.get('/inquiries/product', listAdminProductInquiries);
+-router.patch('/inquiries/product/:id', updateProductInquiryStatus);
+-router.get('/inquiries/support', listAdminSupportRequests);
+-router.patch('/inquiries/support/:id', updateSupportRequestStatus);
+-
+-// Owner-notification retry for a public request.
+-router.post('/inquiry-notifications/:id/retry', retryInquiryNotification);
+-
+ export default router;
+diff --git a/src/modules/auth/authorization.ts b/src/modules/auth/authorization.ts
+index 0996496..3728f71 100644
+--- a/src/modules/auth/authorization.ts
++++ b/src/modules/auth/authorization.ts
+@@ -69,6 +69,44 @@ export function isAuthorizedAdmin(candidate: AdminCandidate): boolean {
+   return effectiveRole(candidate) === 'ADMIN';
+ }
+ 
++/**
++ * Every restricted customer-support email, normalized. The UNION of all
++ * `SUPPORT_EMAILS` entries (deduplicated). A support account is NOT an
++ * administrator: it may only touch the public-request inbox. Never derived from
++ * the database `role`, a frontend value, or any user-editable field.
++ */
++export const AUTHORIZED_SUPPORT_EMAILS: readonly string[] = (() => {
++  const set = new Set<string>();
++  for (const entry of parseEmailList(env.SUPPORT_EMAILS)) set.add(normalizeEmail(entry));
++  return [...set];
++})();
++
++/** True only for a configured support email (exact, case/whitespace-insensitive). */
++export function isAuthorizedSupportEmail(email: string | null | undefined): boolean {
++  if (!email) return false;
++  return AUTHORIZED_SUPPORT_EMAILS.includes(normalizeEmail(email));
++}
++
++/**
++ * True when the candidate is an authorized support account: a configured
++ * support email AND a provider-verified email. Support is deliberately a
++ * separate capability from admin (a support email is never an administrator)
++ * and grants access ONLY to the public-request inbox routes.
++ */
++export function isAuthorizedSupport(candidate: AdminCandidate): boolean {
++  return isAuthorizedSupportEmail(candidate.email) && candidate.emailVerified === true;
++}
++
++/**
++ * A privileged account that must authenticate with a provider (Google/Firebase)
++ * only: an authorized administrator OR an authorized support account. Password
++ * registration is blocked for these emails and any attached password is dropped
++ * on provider sign-in, closing the account-pre-registration window.
++ */
++export function isReservedPrivilegedEmail(email: string | null | undefined): boolean {
++  return isAuthorizedAdminEmail(email) || isAuthorizedSupportEmail(email);
++}
++
+ /**
+  * Firebase custom-claim administrator check. The `admin` claim is set ONLY by
+  * the server (Admin SDK `setCustomUserClaims`) ΓÇö a client can never forge it. To

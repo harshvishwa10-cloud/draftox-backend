@@ -101,6 +101,57 @@ describe('GET /api/v1/products/:slug', () => {
   });
 });
 
+describe('High-Voltage Series catalog', () => {
+  const expected = [
+    { slug: 'draftox-16-channel-hv4', price: 9989, mrp: 11589, savings: 1600, highVoltageChannels: 4 },
+    { slug: 'draftox-24-channel-hv7', price: 17989, mrp: 20789, savings: 2800, highVoltageChannels: 7 },
+    { slug: 'draftox-40-channel-hv10', price: 26999, mrp: 28579, savings: 1580, highVoltageChannels: 10 },
+  ];
+
+  it('lists the three high-voltage products as published preorders', async () => {
+    const res = await request(app).get('/api/v1/products?limit=50');
+    expect(res.status).toBe(200);
+
+    for (const item of expected) {
+      const product = res.body.data.items.find(
+        (p: { slug: string }) => p.slug === item.slug,
+      );
+      expect(product, `${item.slug} should be listed`).toBeDefined();
+      expect(product.status).toBe('PUBLISHED');
+      expect(Number(product.price)).toBe(item.price);
+      expect(product.availability).toBe('PREORDER');
+      expect(product.specifications.highVoltageChannels).toBe(item.highVoltageChannels);
+      expect(product.specifications.series).toBe('high-voltage');
+      expect(product).not.toHaveProperty('internalNotes');
+      expect(Number(product.mrp)).toBe(item.mrp);
+      expect(Number(product.mrp)).toBeGreaterThan(Number(product.price));
+      expect(Number(product.mrp) - Number(product.price)).toBe(item.savings);
+    }
+  });
+
+  it('never exposes internalNotes for a high-voltage product', async () => {
+    const res = await request(app).get('/api/v1/products/draftox-16-channel-hv4');
+    expect(res.status).toBe(200);
+    expect(res.body.data.product).not.toHaveProperty('internalNotes');
+    expect(JSON.stringify(res.body)).not.toContain('contactors');
+  });
+
+  it('returns each high-voltage product by slug', async () => {
+    for (const item of expected) {
+      const res = await request(app).get(`/api/v1/products/${item.slug}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.product.slug).toBe(item.slug);
+      expect(Number(res.body.data.product.price)).toBe(item.price);
+      expect(res.body.data.product.specifications.highVoltageChannels).toBe(
+        item.highVoltageChannels,
+      );
+      expect(Number(res.body.data.product.mrp)).toBe(item.mrp);
+      expect(Number(res.body.data.product.mrp)).toBeGreaterThan(Number(res.body.data.product.price));
+      expect(Number(res.body.data.product.mrp) - Number(res.body.data.product.price)).toBe(item.savings);
+    }
+  });
+});
+
 describe('CSRF protection', () => {
   it('rejects state-changing requests without a CSRF token', async () => {
     const { agent } = await createAgent(app);

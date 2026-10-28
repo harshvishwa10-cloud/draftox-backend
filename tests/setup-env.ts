@@ -20,10 +20,12 @@ process.env.BREVO_API_KEY = '';
 // address. These match the documented code defaults in src/config/env.ts.
 process.env.ADMIN_EMAIL = 'draftox0@gmail.com';
 process.env.SUPPORT_EMAIL = 'draftoxcustomersupport@gmail.com';
-// Both official DRAFTOX accounts are authorized administrators (the authorized
-// set is the UNION of ADMIN_EMAIL and ADMIN_EMAILS) — pinned here so every test
-// file exercises the same two-admin policy as production.
-process.env.ADMIN_EMAILS = 'draftox0@gmail.com,draftoxcustomersupport@gmail.com';
+// The ONLY full administrator is draftox0@gmail.com. The customer-support
+// address is a SEPARATE, RESTRICTED support account (SUPPORT_EMAILS) that may
+// only touch the public-request inbox — pinned here so every test file exercises
+// the same single-admin + restricted-support policy as production.
+process.env.ADMIN_EMAILS = 'draftox0@gmail.com';
+process.env.SUPPORT_EMAILS = 'draftoxcustomersupport@gmail.com';
 // Ensure Google OAuth stays disabled in tests regardless of local .env values.
 process.env.GOOGLE_CLIENT_ID = '';
 process.env.GOOGLE_CLIENT_SECRET = '';

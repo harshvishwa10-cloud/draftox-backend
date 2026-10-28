@@ -132,36 +132,35 @@ describe('Firebase session-cookie authentication', () => {
     expect((await agent.get('/api/v1/admin/orders')).status).toBe(200);
   });
 
-  it('grants admin to the verified support account and writes the admin claim', async () => {
+  it('keeps the verified support account a RESTRICTED non-admin (no claim, inbox only)', async () => {
     mockAuth.verifyIdToken.mockResolvedValue({
-      uid: 'uid-support-admin',
+      uid: 'uid-support-account',
       email: SUPPORT_EMAIL,
       email_verified: true,
       name: 'DRAFTOX Support',
     });
-    mockAuth.createSessionCookie.mockResolvedValue('fb-cookie-support-admin');
+    mockAuth.createSessionCookie.mockResolvedValue('fb-cookie-support-account');
     mockAuth.verifySessionCookie.mockResolvedValue({
-      uid: 'uid-support-admin',
+      uid: 'uid-support-account',
       email: SUPPORT_EMAIL,
       email_verified: true,
-      admin: true,
     });
 
     const { agent, csrfToken } = await createAgent(app);
-    const res = await exchange(agent, csrfToken, 'id-token-support-admin');
+    const res = await exchange(agent, csrfToken, 'id-token-support-account');
     expect(res.status).toBe(200);
 
-    // The server granted the admin custom claim to the support account too.
-    expect(mockAuth.setCustomUserClaims).toHaveBeenCalledWith('uid-support-admin', {
-      admin: true,
-    });
+    // The support account is NEVER granted the admin custom claim.
+    expect(mockAuth.setCustomUserClaims).not.toHaveBeenCalled();
 
     const me = await agent.get('/api/v1/auth/me');
-    expect(me.body.data.user.role).toBe('ADMIN');
-    expect((await agent.get('/api/v1/admin/orders')).status).toBe(200);
+    expect(me.body.data.user.role).toBe('CUSTOMER');
+    // Denied full-admin routes, allowed the restricted inbox.
+    expect((await agent.get('/api/v1/admin/orders')).status).toBe(403);
+    expect((await agent.get('/api/v1/admin/inquiries/contact')).status).toBe(200);
   });
 
-  it('never grants admin to the support email without a verified email', async () => {
+  it('never grants the support account admin or inbox access without a verified email', async () => {
     mockAuth.verifyIdToken.mockResolvedValue({
       uid: 'uid-support-unverified',
       email: SUPPORT_EMAIL,
@@ -183,6 +182,8 @@ describe('Firebase session-cookie authentication', () => {
     const me = await agent.get('/api/v1/auth/me');
     expect(me.body.data.user.role).toBe('CUSTOMER');
     expect((await agent.get('/api/v1/admin/orders')).status).toBe(403);
+    // Unverified support is denied the restricted inbox too.
+    expect((await agent.get('/api/v1/admin/inquiries/contact')).status).toBe(403);
   });
 
   it('never grants admin from a forged claim on a non-admin email', async () => {
@@ -262,7 +263,7 @@ describe('Firebase session-cookie authentication', () => {
 // ADMIN from the allow-list + verified email, exactly like every other path.
 // ---------------------------------------------------------------------------
 describe('stale/absent admin-claim regression', () => {
-  it('grants ADMIN to the support email when the cookie has no admin claim', async () => {
+  it('never resolves the support email as ADMIN, even with a stale admin claim', async () => {
     mockAuth.verifyIdToken.mockResolvedValue({
       uid: 'uid-support-stale-claim',
       email: SUPPORT_EMAIL,
@@ -270,27 +271,27 @@ describe('stale/absent admin-claim regression', () => {
       name: 'DRAFTOX Support',
     });
     mockAuth.createSessionCookie.mockResolvedValue('fb-cookie-support-stale');
-    // No `admin` field: this is the first-sign-in / stale-token case.
+    // A stale `admin` claim on the support account must be inert (defence in
+    // depth: authorization is by allow-list, not the claim).
     mockAuth.verifySessionCookie.mockResolvedValue({
       uid: 'uid-support-stale-claim',
       email: SUPPORT_EMAIL,
       email_verified: true,
+      admin: true,
     });
 
     const { agent, csrfToken } = await createAgent(app);
     const res = await exchange(agent, csrfToken, 'id-token-support-stale');
     expect(res.status).toBe(200);
-    // The immediate login response already reports ADMIN (no claim needed).
-    expect(res.body.data.user.role).toBe('ADMIN');
-    // Defence in depth: the server still writes the claim for later tokens.
-    expect(mockAuth.setCustomUserClaims).toHaveBeenCalledWith('uid-support-stale-claim', {
-      admin: true,
-    });
+    expect(res.body.data.user.role).toBe('CUSTOMER');
+    expect(mockAuth.setCustomUserClaims).not.toHaveBeenCalled();
 
     const me = await agent.get('/api/v1/auth/me');
     expect(me.status).toBe(200);
-    expect(me.body.data.user.role).toBe('ADMIN');
-    expect((await agent.get('/api/v1/admin/orders')).status).toBe(200);
+    expect(me.body.data.user.role).toBe('CUSTOMER');
+    // Denied full-admin, allowed the restricted inbox.
+    expect((await agent.get('/api/v1/admin/orders')).status).toBe(403);
+    expect((await agent.get('/api/v1/admin/inquiries/contact')).status).toBe(200);
   });
 
   it('grants ADMIN to the primary admin email when the cookie has no admin claim', async () => {
@@ -318,20 +319,20 @@ describe('stale/absent admin-claim regression', () => {
   it('a stale CUSTOMER database role cannot deny an authorized, verified admin', async () => {
     const { prisma } = await import('../src/lib/prisma.js');
     await prisma.user.upsert({
-      where: { email: SUPPORT_EMAIL },
+      where: { email: ADMIN_EMAIL },
       update: { role: 'CUSTOMER', emailVerified: true },
-      create: { name: 'DRAFTOX Support', email: SUPPORT_EMAIL, role: 'CUSTOMER', emailVerified: true },
+      create: { name: 'DRAFTOX Owner', email: ADMIN_EMAIL, role: 'CUSTOMER', emailVerified: true },
     });
 
     mockAuth.verifyIdToken.mockResolvedValue({
-      uid: 'uid-support-stale-role',
-      email: SUPPORT_EMAIL,
+      uid: 'uid-admin-stale-role',
+      email: ADMIN_EMAIL,
       email_verified: true,
     });
     mockAuth.createSessionCookie.mockResolvedValue('fb-cookie-stale-role');
     mockAuth.verifySessionCookie.mockResolvedValue({
-      uid: 'uid-support-stale-role',
-      email: SUPPORT_EMAIL,
+      uid: 'uid-admin-stale-role',
+      email: ADMIN_EMAIL,
       email_verified: true,
     });
 
@@ -368,21 +369,21 @@ describe('stale/absent admin-claim regression', () => {
   it('an unverified sign-in stays CUSTOMER even if the stored row says verified', async () => {
     const { prisma } = await import('../src/lib/prisma.js');
     await prisma.user.upsert({
-      where: { email: SUPPORT_EMAIL },
+      where: { email: ADMIN_EMAIL },
       update: { role: 'CUSTOMER', emailVerified: true },
-      create: { name: 'DRAFTOX Support', email: SUPPORT_EMAIL, role: 'CUSTOMER', emailVerified: true },
+      create: { name: 'DRAFTOX Owner', email: ADMIN_EMAIL, role: 'CUSTOMER', emailVerified: true },
     });
 
     // Token says the email is NOT verified; the stale stored flag must not grant.
     mockAuth.verifyIdToken.mockResolvedValue({
-      uid: 'uid-support-unverified-v2',
-      email: SUPPORT_EMAIL,
+      uid: 'uid-admin-unverified-v2',
+      email: ADMIN_EMAIL,
       email_verified: false,
     });
     mockAuth.createSessionCookie.mockResolvedValue('fb-cookie-unverified-v2');
     mockAuth.verifySessionCookie.mockResolvedValue({
-      uid: 'uid-support-unverified-v2',
-      email: SUPPORT_EMAIL,
+      uid: 'uid-admin-unverified-v2',
+      email: ADMIN_EMAIL,
       email_verified: false,
     });
 

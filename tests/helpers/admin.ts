@@ -6,10 +6,13 @@ import { createAgent, type AgentWithCsrf } from './agent.js';
 export const ADMIN_EMAIL = 'draftox0@gmail.com';
 export const ADMIN_PASSWORD = 'testadminpassword1';
 export const ADMIN_NAME = 'Test Admin';
-/** The second authorized administrator AND the support/shipment SENDER account. */
+/**
+ * The customer-support address: a RESTRICTED support account (configured in
+ * SUPPORT_EMAILS), NOT an administrator. Also the shipment-email SENDER.
+ */
 export const SUPPORT_EMAIL = 'draftoxcustomersupport@gmail.com';
-export const SUPPORT_ADMIN_PASSWORD = 'testsupportpassword1';
-export const SUPPORT_ADMIN_NAME = 'DRAFTOX Support';
+export const SUPPORT_PASSWORD = 'testsupportpassword1';
+export const SUPPORT_NAME = 'DRAFTOX Support';
 
 export interface Authed extends AgentWithCsrf {
   email: string;
@@ -17,9 +20,10 @@ export interface Authed extends AgentWithCsrf {
 }
 
 /**
- * Ensures an authorized admin account exists with a known password and a
- * verified email. The database `role` is intentionally left as CUSTOMER to
- * prove that authorization comes from the email + verification, not the role.
+ * Ensures a provider-VERIFIED account exists with a known password. Used for
+ * BOTH the full-admin and the restricted-support test identities. The database
+ * `role` is intentionally left as CUSTOMER to prove that authorization comes
+ * from the server-side email allow-list + verification, not the role column.
  */
 export async function ensureAdminUser(
   email: string = ADMIN_EMAIL,
@@ -76,14 +80,15 @@ export function getAdminAgent(app: Express): Promise<Authed> {
 let cachedSupport: Promise<Authed> | null = null;
 
 /**
- * Shared authorized-admin agent for the support account — a SEPARATE identity
- * that must obtain admin on its own (never by impersonating the primary admin).
+ * Shared RESTRICTED support agent — a verified support account that is NOT an
+ * administrator. It may reach ONLY the public-request inbox routes, never the
+ * order/payment/refund/returns admin routes.
  */
-export function getSupportAdminAgent(app: Express): Promise<Authed> {
+export function getSupportAgent(app: Express): Promise<Authed> {
   if (!cachedSupport) {
     cachedSupport = (async () => {
-      await ensureAdminUser(SUPPORT_EMAIL, SUPPORT_ADMIN_NAME, SUPPORT_ADMIN_PASSWORD);
-      return loginAgent(app, SUPPORT_EMAIL, SUPPORT_ADMIN_PASSWORD);
+      await ensureAdminUser(SUPPORT_EMAIL, SUPPORT_NAME, SUPPORT_PASSWORD);
+      return loginAgent(app, SUPPORT_EMAIL, SUPPORT_PASSWORD);
     })();
   }
   return cachedSupport;

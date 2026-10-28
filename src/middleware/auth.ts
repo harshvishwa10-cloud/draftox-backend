@@ -8,7 +8,7 @@ import {
   clearSessionCookie,
   hashToken,
 } from '../utils/cookies.js';
-import { isAuthorizedAdmin } from '../modules/auth/authorization.js';
+import { isAuthorizedAdmin, isAuthorizedSupport } from '../modules/auth/authorization.js';
 import { resolveUserFromSessionCookie } from '../modules/auth/firebase.service.js';
 
 export interface AuthenticatedUser {
@@ -16,8 +16,15 @@ export interface AuthenticatedUser {
   email: string;
   name: string;
   role: 'CUSTOMER' | 'ADMIN';
-  /** True only when a trusted provider (Google) verified the email. */
+  /** Persisted provider-verification flag for the account (may be stale). */
   emailVerified: boolean;
+  /**
+   * True only when THIS request's own credential (the signed Firebase session
+   * cookie or the legacy session) proves a provider-verified email. Privilege
+   * checks (admin/support) use this strict signal, never the persisted flag or a
+   * possibly-stale custom claim.
+   */
+  providerVerified: boolean;
   /**
    * Which mechanism authenticated this request. Both `firebase` and `session`
    * resolve their effective role from the authorized-admin email allow-list +
@@ -79,7 +86,13 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
       throw ApiError.unauthorized('Session expired, please sign in again');
     }
 
-    req.user = session.user;
+    req.user = {
+      ...session.user,
+      authSource: 'session',
+      // For a legacy session the persisted flag IS the provider-verification
+      // proof (it is only ever set by a verified Google/Firebase sign-in).
+      providerVerified: session.user.emailVerified,
+    };
 
     // Refresh lastUsedAt opportunistically (do not block the request on failure)
     prisma.session
@@ -116,7 +129,11 @@ export const optionalAuth: RequestHandler = async (req, _res, next) => {
       },
     });
     if (session && session.expiresAt.getTime() > Date.now()) {
-      req.user = session.user;
+      req.user = {
+        ...session.user,
+        authSource: 'session',
+        providerVerified: session.user.emailVerified,
+      };
     }
     next();
   } catch (err) {
@@ -151,4 +168,36 @@ export const requireAdmin: RequestHandler = (req, _res, next) => {
     return;
   }
   next();
+};
+
+/**
+ * Restricted public-request-inbox gate. Must be mounted AFTER `requireAuth` so
+ * `req.user` is set. It passes for a FULL administrator (exactly like
+ * `requireAdmin`) OR for a configured support account that presented a
+ * provider-verified email in THIS request's credential. It is deliberately used
+ * ONLY for the contact/product/support enquiry inbox and the owner-notification
+ * retry — every financial, order, shipment, refund, payment and returns route
+ * stays behind the full-admin `requireAdmin` gate.
+ */
+export const requireSupportOrAdmin: RequestHandler = (req, _res, next) => {
+  if (!req.user) {
+    next(ApiError.unauthorized());
+    return;
+  }
+  const isAdmin =
+    req.user.authSource === 'firebase'
+      ? req.user.role === 'ADMIN'
+      : isAuthorizedAdmin(req.user);
+  if (isAdmin) {
+    next();
+    return;
+  }
+  // Support: authorized email + a provider-verified email proven by THIS
+  // request's credential (the strict `providerVerified` signal, not the looser
+  // persisted column and not a client-supplied value).
+  if (isAuthorizedSupport({ email: req.user.email, emailVerified: req.user.providerVerified })) {
+    next();
+    return;
+  }
+  next(ApiError.forbidden('Support or admin access is required for this resource'));
 };

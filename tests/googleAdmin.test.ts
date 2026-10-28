@@ -96,9 +96,11 @@ describe('Google OAuth admin authorization', () => {
     expect((await agent.get('/api/v1/admin/orders')).status).toBe(403);
   });
 
-  it('grants admin to the verified support account and redirects to the dashboard', async () => {
-    // draftoxcustomersupport@gmail.com is the second authorized admin (listed in
-    // ADMIN_EMAILS): with a Google-VERIFIED email it signs in as an admin.
+  it('keeps the verified support account as a RESTRICTED support account, not an admin', async () => {
+    // draftoxcustomersupport@gmail.com is a restricted support account
+    // (configured in SUPPORT_EMAILS), NOT an administrator: with a
+    // Google-VERIFIED email it signs in as CUSTOMER and may reach ONLY the
+    // public-request inbox.
     (await identityMock()).mockResolvedValue({
       googleId: 'g-support-sender',
       email: SUPPORT_EMAIL,
@@ -113,11 +115,15 @@ describe('Google OAuth admin authorization', () => {
     expect(res.status).toBe(302);
     const location = res.headers.location as string;
     expect(location).toContain('/auth/callback?status=success');
-    expect(location).toContain(`next=${encodeURIComponent('/admin/orders')}`);
+    // Not an admin, so no admin dashboard redirect.
+    expect(location).toContain(`next=${encodeURIComponent('/account')}`);
 
     const me = await agent.get('/api/v1/auth/me');
-    expect(me.body.data.user.role).toBe('ADMIN');
-    expect((await agent.get('/api/v1/admin/orders')).status).toBe(200);
+    expect(me.body.data.user.role).toBe('CUSTOMER');
+    // Denied every full-admin route...
+    expect((await agent.get('/api/v1/admin/orders')).status).toBe(403);
+    // ...but allowed the restricted public-request inbox.
+    expect((await agent.get('/api/v1/admin/inquiries/contact')).status).toBe(200);
   });
 
   it('never grants admin to a support account whose email is not verified', async () => {
