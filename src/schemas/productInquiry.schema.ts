@@ -3,7 +3,10 @@ import { emailSchema, nameSchema } from './auth.schema.js';
 
 export const productInquirySchema = z
   .object({
-    productId: z.string().trim().min(1, 'Product is required').max(100),
+    /** Backend catalogue id. Optional so the storefront can inquire by slug. */
+    productId: z.string().trim().min(1).max(100).optional(),
+    /** Stable catalogue slug — avoids a catalogue fetch before submitting. */
+    productSlug: z.string().trim().min(1).max(120).optional(),
     customerName: nameSchema,
     email: emailSchema,
     phone: z
@@ -21,6 +24,10 @@ export const productInquirySchema = z
       .min(10, 'Message must be at least 10 characters')
       .max(5000, 'Message must be at most 5000 characters'),
   })
-  .strict();
+  .strict()
+  .refine((input) => Boolean(input.productId || input.productSlug), {
+    message: 'Product is required',
+    path: ['productId'],
+  });
 
 export type ProductInquiryInput = z.infer<typeof productInquirySchema>;

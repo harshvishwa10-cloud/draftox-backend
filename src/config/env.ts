@@ -187,13 +187,13 @@ export const EnvSchema = z
      */
     RETURN_PHOTO_UPLOADS_DIR: z.string().trim().optional(),
     /**
-     * Master ordering switch, controlled ONLY server-side. Set to `true` to
-     * open the store for new orders; anything else (including unset) keeps
-     * ordering disabled while the products are still in development.
-     * The variable is read from environment configuration, so the browser can
-     * never flip it. Missed/invalid values fail open to DISABLED on purpose.
+     * Master ordering switch, controlled ONLY server-side. Ordering is OPEN by
+     * default so the Diwali launch does not depend on a dashboard variable
+     * being present; set to `false` to pause new orders deliberately. The
+     * variable is read from environment configuration, so the browser can
+     * never flip it.
      */
-    STORE_ORDERS_ENABLED: z.enum(['true', 'false']).default('false'),
+    STORE_ORDERS_ENABLED: z.enum(['true', 'false']).default('true'),
     /**
      * Local-development test-price switch. When `true` (and NODE_ENV is not
      * `production`) the 16-channel system is priced at a token ₹10 so a
@@ -379,10 +379,10 @@ export const supportEmail = env.SUPPORT_EMAIL;
 export const ownerNotificationEmail = env.OWNER_NOTIFICATION_EMAIL ?? env.ADMIN_EMAIL;
 
 /**
- * Master ordering switch. Defaults to DISABLED everywhere except the test
- * suite (tests intentionally exercise the full order flow, so setup-env.ts
- * sets `STORE_ORDERS_ENABLED=true` unless a test file overrides it).
- * Send no money and create no orders while this is false.
+ * Master ordering switch. Open by default for the Diwali launch; an explicit
+ * `STORE_ORDERS_ENABLED=false` pauses new orders. Tests intentionally exercise
+ * the full order flow (setup-env.ts sets `STORE_ORDERS_ENABLED=true` unless a
+ * test file overrides it).
  */
 export const storeOrdersEnabled = env.STORE_ORDERS_ENABLED === 'true';
 

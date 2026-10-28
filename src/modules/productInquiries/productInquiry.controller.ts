@@ -12,9 +12,16 @@ import {
 export const createProductInquiry = asyncHandler(async (req: Request, res: Response) => {
   const input = productInquirySchema.parse(req.body);
 
-  // Only published products can be publicly inquired about.
+  // Only published products can be publicly inquired about. The storefront may
+  // identify the product by backend id or by its stable slug.
   const product = await prisma.product.findFirst({
-    where: { id: input.productId, status: 'PUBLISHED' },
+    where: {
+      status: 'PUBLISHED',
+      OR: [
+        ...(input.productId ? [{ id: input.productId }] : []),
+        ...(input.productSlug ? [{ slug: input.productSlug }] : []),
+      ],
+    },
     select: { id: true, name: true, slug: true },
   });
   if (!product) {
