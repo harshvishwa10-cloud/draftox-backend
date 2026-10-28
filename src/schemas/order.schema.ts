@@ -7,10 +7,18 @@ const phoneSchema = z
   .regex(/^[+0-9()\-\s]{5,20}$/, 'Enter a valid phone number')
   .optional();
 
-export const orderItemSchema = z.object({
-  productId: z.string().trim().min(1, 'Product is required').max(100),
-  qty: z.coerce.number().int().min(1).max(10),
-});
+export const orderItemSchema = z
+  .object({
+    /** Backend catalogue id. Kept optional so the storefront can order by slug. */
+    productId: z.string().trim().min(1).max(100).optional(),
+    /** Stable catalogue slug — lets the storefront order without a catalog fetch. */
+    slug: z.string().trim().min(1).max(120).optional(),
+    qty: z.coerce.number().int().min(1).max(10),
+  })
+  .refine((item) => Boolean(item.productId || item.slug), {
+    message: 'Product is required',
+    path: ['productId'],
+  });
 
 export const createOrderSchema = z
   .object({

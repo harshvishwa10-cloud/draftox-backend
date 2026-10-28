@@ -126,13 +126,24 @@ export const createOrder = asyncHandler(async (req: Request, res: Response) => {
   }
 
   // Authoritative pricing: every line is re-priced from published DB rows.
-  // Client-submitted totals are never trusted.
-  const ids = [...new Set(input.items.map((i) => i.productId))];
+  // Client-submitted totals are never trusted. Items may be identified by the
+  // backend id OR the stable slug, so the storefront never has to fetch the
+  // catalogue before checkout (that extra fetch was the "live catalog did not
+  // return a system" failure whenever the catalog request hiccupped).
+  const ids = [...new Set(input.items.map((i) => i.productId).filter(Boolean))] as string[];
+  const slugs = [...new Set(input.items.map((i) => i.slug).filter(Boolean))] as string[];
   const rows = await prisma.product.findMany({
-    where: { id: { in: ids }, status: 'PUBLISHED' },
+    where: {
+      status: 'PUBLISHED',
+      OR: [
+        ...(ids.length ? [{ id: { in: ids } }] : []),
+        ...(slugs.length ? [{ slug: { in: slugs } }] : []),
+      ],
+    },
     select: { id: true, slug: true, name: true, price: true, currency: true, image: true, warrantyMonths: true },
   });
   const byId = new Map(rows.map((r) => [r.id, r]));
+  const bySlug = new Map(rows.map((r) => [r.slug, r]));
 
   const pricedItems: Array<{
     productId: string;
@@ -145,7 +156,9 @@ export const createOrder = asyncHandler(async (req: Request, res: Response) => {
     warrantyMonths: number | null;
   }> = [];
   for (const item of input.items) {
-    const row = byId.get(item.productId);
+    const row =
+      (item.productId ? byId.get(item.productId) : undefined) ??
+      (item.slug ? bySlug.get(item.slug) : undefined);
     if (!row || row.price === null) {
       throw ApiError.notFound('One or more products are unavailable');
     }
