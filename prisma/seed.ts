@@ -35,7 +35,7 @@ const CATALOG: SeedProduct[] = [
     price: 7999,
     mrp: 13500,
     image: '/images/products/card-16.png',
-    warrantyMonths: 6,
+    warrantyMonths: 12,
     features: [
       '16 relay channels in one controller',
       'Mobile app operation over Wi-Fi',
@@ -101,7 +101,7 @@ const CATALOG: SeedProduct[] = [
     price: 9989,
     mrp: 11589,
     image: '/images/products/card-16-hv.png',
-    warrantyMonths: 6,
+    warrantyMonths: 12,
     features: [
       '16 standard relay channels',
       '4 extra high-voltage channels for heavy appliances',
@@ -128,7 +128,7 @@ const CATALOG: SeedProduct[] = [
     price: 17989,
     mrp: 20789,
     image: '/images/products/card-24-hv.png',
-    warrantyMonths: 12,
+    warrantyMonths: 18,
     features: [
       '24 standard relay channels',
       '7 extra high-voltage channels for heavy appliances',
@@ -155,7 +155,7 @@ const CATALOG: SeedProduct[] = [
     price: 26999,
     mrp: 28579,
     image: '/images/products/card-40-hv.png',
-    warrantyMonths: 24,
+    warrantyMonths: 26,
     features: [
       '40 standard relay channels',
       '10 extra high-voltage channels for heavy appliances',
