@@ -62,8 +62,8 @@ process.env.COOKIE_DOMAIN = '';
 process.env.RATE_LIMIT_MAX = '100000';
 process.env.AUTH_RATE_LIMIT_MAX = '100000';
 process.env.INQUIRY_RATE_LIMIT_MAX = '100000';
-// Tests exercise the full order/payment flow, so ordering starts ENABLED here
-// (unlike the boot default of disabled), independent of the developer's local
-// .env. tests/ordersDisabled.test.ts flips this to 'false' before importing the
-// app to prove the server-side gate, so both gate states stay covered.
-process.env.STORE_ORDERS_ENABLED = 'true';
+// Tests exercise the full order/payment flow, so ordering starts OPEN here,
+// independent of the developer's local .env. tests/ordersDisabled.test.ts
+// flips the pause flag on before importing the app to prove the server-side
+// gate, so both gate states stay covered.
+process.env.STORE_ORDERS_PAUSED = 'false';

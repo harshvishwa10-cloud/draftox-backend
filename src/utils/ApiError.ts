@@ -47,7 +47,7 @@ export class ApiError extends Error {
     return new ApiError(503, 'SERVICE_UNAVAILABLE', message);
   }
 
-  /** Ordering is intentionally turned off (server-side `STORE_ORDERS_ENABLED`). */
+  /** Ordering is intentionally paused (server-side `STORE_ORDERS_PAUSED`). */
   static ordersDisabled(message: string) {
     return new ApiError(503, 'ORDERS_DISABLED', message);
   }

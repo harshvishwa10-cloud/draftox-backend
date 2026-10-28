@@ -187,13 +187,20 @@ export const EnvSchema = z
      */
     RETURN_PHOTO_UPLOADS_DIR: z.string().trim().optional(),
     /**
-     * Master ordering switch, controlled ONLY server-side. Ordering is OPEN by
-     * default so the Diwali launch does not depend on a dashboard variable
-     * being present; set to `false` to pause new orders deliberately. The
-     * variable is read from environment configuration, so the browser can
+     * Master ordering PAUSE switch, controlled ONLY server-side. Ordering is
+     * OPEN by default so the Diwali launch does not depend on a dashboard
+     * variable being present; set to `true` to pause new orders deliberately.
+     * The variable is read from environment configuration, so the browser can
      * never flip it.
      */
-    STORE_ORDERS_ENABLED: z.enum(['true', 'false']).default('true'),
+    STORE_ORDERS_PAUSED: z.enum(['true', 'false']).default('false'),
+    /**
+     * @deprecated Legacy switch, accepted only so old deployments still pass
+     * env validation. It is NOT authoritative: a stale `false` left in a host
+     * dashboard must never silently close a launched storefront. Use
+     * `STORE_ORDERS_PAUSED=true` to pause ordering.
+     */
+    STORE_ORDERS_ENABLED: z.enum(['true', 'false']).optional(),
     /**
      * Local-development test-price switch. When `true` (and NODE_ENV is not
      * `production`) the 16-channel system is priced at a token ₹10 so a
@@ -379,12 +386,13 @@ export const supportEmail = env.SUPPORT_EMAIL;
 export const ownerNotificationEmail = env.OWNER_NOTIFICATION_EMAIL ?? env.ADMIN_EMAIL;
 
 /**
- * Master ordering switch. Open by default for the Diwali launch; an explicit
- * `STORE_ORDERS_ENABLED=false` pauses new orders. Tests intentionally exercise
- * the full order flow (setup-env.ts sets `STORE_ORDERS_ENABLED=true` unless a
- * test file overrides it).
+ * Master ordering switch. Open for the Diwali launch unless a host explicitly
+ * sets `STORE_ORDERS_PAUSED=true`. The legacy `STORE_ORDERS_ENABLED` variable
+ * is intentionally ignored here so an old dashboard value cannot keep the
+ * storefront closed. Tests exercise the disabled path by setting the pause
+ * flag (tests/helpers/orders-disabled-env.ts).
  */
-export const storeOrdersEnabled = env.STORE_ORDERS_ENABLED === 'true';
+export const storeOrdersEnabled = env.STORE_ORDERS_PAUSED === 'false';
 
 /**
  * From header for outbound email (shipment notifications). Defaults to the

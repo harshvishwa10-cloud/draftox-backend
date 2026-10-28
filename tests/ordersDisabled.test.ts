@@ -1,5 +1,5 @@
 // NOTE: './helpers/orders-disabled-env.js' MUST stay the first import — it
-// flips STORE_ORDERS_ENABLED=false BEFORE src/config/env.ts is first evaluated
+// flips STORE_ORDERS_PAUSED=true BEFORE src/config/env.ts is first evaluated
 // for this test file.
 import './helpers/orders-disabled-env.js';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -42,7 +42,7 @@ async function registerAgent() {
   return { agent, csrfToken };
 }
 
-describe('ordering disabled (STORE_ORDERS_ENABLED=false)', () => {
+describe('ordering paused (STORE_ORDERS_PAUSED=true)', () => {
   it('rejects new order creation with 503 ORDERS_DISABLED — the gate is server-side', async () => {
     const { agent, csrfToken } = await createAgent(app);
     const res = await agent

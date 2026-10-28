@@ -1,8 +1,8 @@
 # DRAFTOX Operations Runbook
 
 Operational procedures for the DRAFTOX backend: scheduled payment tasks,
-database backup/restore, and alerting. Nothing here sends money or enables live
-checkout — `STORE_ORDERS_ENABLED` stays off unless deliberately turned on.
+database backup/restore, and alerting. Nothing here sends money by itself.
+Checkout is open unless a host deliberately sets `STORE_ORDERS_PAUSED=true`.
 
 ---
 

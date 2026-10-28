@@ -3,7 +3,7 @@
 **Status:** Operational for a self-hostable deployment. This document is informational only. No domain was purchased, no deployment was performed, and no live transactions were executed as part of this run.
 
 ## 1. Goals & Guardrails
-- Orders disabled by default; enable only when ready (`STORE_ORDERS_ENABLED=true`, `NEXT_PUBLIC_STORE_ORDERS_ENABLED=true`). 
+- Orders are open by default; pause deliberately when needed (`STORE_ORDERS_PAUSED=true`, `NEXT_PUBLIC_STORE_ORDERS_ENABLED=false`).
 - Never expose secrets in logs. Backup/restore are destructive — require explicit confirmation (`RESTORE_CONFIRM=restore`).
 - Password reset with SMTP emails a single-use link (`<PUBLIC_SITE_URL>/reset-password?token=...`) and never returns the token.
 - Scheduler is idempotent across processes, overlap-safe within a process.
@@ -33,7 +33,7 @@ See `.env.example` for exhaustive list. Minimum safe production-like set:
 - SMTP: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM` (if not default)
 - `ADMIN_EMAIL=draftox0@gmail.com`, `SUPPORT_EMAIL=draftoxcustomersupport@gmail.com`
 - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`
-- `STORE_ORDERS_ENABLED=false` (enable only when open)
+- `STORE_ORDERS_PAUSED=false` (set `true` only to pause ordering)
 - `SCHEDULER_INTERVAL_MINUTES=10`, `RECONCILE_GRACE_MINUTES=10`, `RECONCILE_BATCH_SIZE=25`
 - `BACKUP_DIR=./backups`, `BACKUP_RETENTION_DAYS=7`, `BACKUP_LOG_FILE=./logs/backup.log`, optional `GPG_PASSPHRASE`, `BACKUP_NOTIFY_EMAIL`, `BACKUP_ALERT_CHANNEL`
 - `TRUST_PROXY=1` (overridable if behind >1 proxies; not present — see recommendation)
