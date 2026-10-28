@@ -29,7 +29,7 @@ interface SeedProduct {
 const CATALOG: SeedProduct[] = [
   {
     slug: 'draftox-16-channel',
-    name: 'DRAFTOX 16-Channel Relay System',
+    name: 'RESIDE 16-Channel Relay System',
     description:
       'ESP32-based 16-channel relay control with mobile app operation. A compact option for smaller installations; channel setup is confirmed before dispatch.',
     price: 7999,
@@ -50,7 +50,7 @@ const CATALOG: SeedProduct[] = [
   },
   {
     slug: 'draftox-24-channel',
-    name: 'DRAFTOX 24-Channel Relay System',
+    name: 'RESIDE 24-Channel Relay System',
     description:
       'ESP32-based 24-channel relay control for larger homes and small sites. Greater channel capacity with mobile app operation; configuration confirmed before dispatch.',
     price: 11999,
@@ -71,7 +71,7 @@ const CATALOG: SeedProduct[] = [
   },
   {
     slug: 'draftox-40-channel',
-    name: 'DRAFTOX 40-Channel Relay System',
+    name: 'RESIDE 40-Channel Relay System',
     description:
       'ESP32-based 40-channel relay control for extensive multi-room installations. Channel planning is worked out with the DRAFTOX team before dispatch.',
     price: 19999,
@@ -95,7 +95,7 @@ const CATALOG: SeedProduct[] = [
   // mrp = declared M.R.P. supplied by the owner (displayed with strikethrough; savings are computed in the UI).
   {
     slug: 'draftox-16-channel-hv4',
-    name: 'DRAFTOX 16-Channel + 4 High-Voltage Relay System',
+    name: 'RESIDE 16-Channel + 4 High-Voltage Relay System',
     description:
       'ESP32-based 16-channel relay control with 4 additional high-voltage channels for heavy appliances such as geysers and air conditioners. Mobile app operation over Wi-Fi. Heavy-load channel setup and load suitability are confirmed with you before dispatch.',
     price: 9989,
@@ -122,7 +122,7 @@ const CATALOG: SeedProduct[] = [
   },
   {
     slug: 'draftox-24-channel-hv7',
-    name: 'DRAFTOX 24-Channel + 7 High-Voltage Relay System',
+    name: 'RESIDE 24-Channel + 7 High-Voltage Relay System',
     description:
       'ESP32-based 24-channel relay control with 7 additional high-voltage channels for heavy appliances such as geysers and air conditioners. Mobile app operation over Wi-Fi. Heavy-load channel setup and load suitability are confirmed with you before dispatch.',
     price: 17989,
@@ -149,7 +149,7 @@ const CATALOG: SeedProduct[] = [
   },
   {
     slug: 'draftox-40-channel-hv10',
-    name: 'DRAFTOX 40-Channel + 10 High-Voltage Relay System',
+    name: 'RESIDE 40-Channel + 10 High-Voltage Relay System',
     description:
       'ESP32-based 40-channel relay control with 10 additional high-voltage channels for heavy appliances such as geysers and air conditioners. Mobile app operation over Wi-Fi. Heavy-load channel setup and load suitability are confirmed with you before dispatch.',
     price: 26999,
