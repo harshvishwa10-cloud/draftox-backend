@@ -243,6 +243,86 @@ ${input.bodyText}
 }
 
 /* ------------------------------------------------------------------ */
+/* Admin / business new-order notification                             */
+/* ------------------------------------------------------------------ */
+
+export function buildAdminOrderEmail(
+  order: OrderEmailContext & { phone?: string | null; address?: unknown },
+  opts: { paymentMethodLabel: string; adminUrl?: string | null },
+): MailInput {
+  const orderNo = order.orderNumber ?? 'N/A';
+  const amount = Number(order.amount);
+  const subtotal = order.subtotal === null || order.subtotal === undefined ? amount : Number(order.subtotal);
+  const deliveryFee = Math.max(0, Math.round((amount - subtotal) * 100) / 100);
+  const total = formatCurrency(order.currency, amount);
+  const subtotalText = formatCurrency(order.currency, subtotal);
+  const deliveryText = deliveryFee > 0 ? formatCurrency(order.currency, deliveryFee) : 'Free';
+  const createdAt = order.createdAt ? new Date(order.createdAt) : new Date();
+  const dateText = createdAt.toLocaleString('en-IN', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+  const addr = order.address as { line?: string; city?: string; state?: string; pincode?: string } | null | undefined;
+  const addressText = addr
+    ? [addr.line, addr.city, addr.state, addr.pincode].filter(Boolean).join(', ')
+    : '—';
+
+  const details = detailTable([
+    detailRow('Order number', `#${orderNo}`),
+    detailRow('Order date', dateText),
+    detailRow('Customer', order.name),
+    detailRow('Email', order.email),
+    ...(order.phone ? [detailRow('Phone', order.phone)] : []),
+    detailRow('Delivery address', addressText),
+    detailRow('Payment method', opts.paymentMethodLabel),
+    detailRow('Order status', 'CONFIRMED (Cash on Delivery)'),
+    detailRow('Subtotal', subtotalText),
+    detailRow('Delivery', deliveryText),
+    detailRow('Total payable', total),
+  ]);
+
+  const adminLink = opts.adminUrl
+    ? `<p style="margin:16px 0 0;"><a href="${escapeHtml(opts.adminUrl)}" style="color:#1d4ed8;text-decoration:underline;font-weight:600;">Open order in admin panel &rarr;</a></p>`
+    : '';
+
+  const body = `<p style="margin:0 0 12px;font-weight:700;">A new DRAFTOX order has been placed.</p>
+<h2 style="margin:16px 0 6px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;font-weight:700;color:#0b1b33;">Order details</h2>
+${details}
+<h2 style="margin:20px 0 6px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;font-weight:700;color:#0b1b33;">Items ordered</h2>
+${itemsTable(order)}
+${adminLink}
+<p style="margin:20px 0 0;color:#6b7280;font-size:13px;">This is an automated notification. No online payment was taken — the customer will pay on delivery.</p>`;
+
+  return {
+    to: '', // will be set by caller
+    subject: `New DRAFTOX Order — #${orderNo}`,
+    html: renderLayout(
+      `New DRAFTOX order #${orderNo}`,
+      `New order #${orderNo}`,
+      body,
+    ),
+    text: `A new DRAFTOX order has been placed.
+
+Order number: #${orderNo}
+Order date: ${dateText}
+Customer: ${order.name}
+Email: ${order.email}
+${order.phone ? `Phone: ${order.phone}\n` : ''}Delivery address: ${addressText}
+Payment method: ${opts.paymentMethodLabel}
+Order status: CONFIRMED (Cash on Delivery)
+Subtotal: ${subtotalText}
+Delivery: ${deliveryText}
+Total payable: ${total}
+
+Items ordered:
+${(order.items ?? []).map((i) => `${i.name} ×${i.qty} — ${formatCurrency(order.currency, i.lineTotal)}`).join('\n')}
+
+${opts.adminUrl ? `Open order in admin panel: ${opts.adminUrl}\n` : ''}
+This is an automated notification. No online payment was taken — the customer will pay on delivery.
+
+- The DRAFTOX team`,
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* Outbox send + retry                                                  */
 /* ------------------------------------------------------------------ */
 

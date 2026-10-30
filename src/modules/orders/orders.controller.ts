@@ -6,7 +6,7 @@ import { ApiError } from '../../utils/ApiError.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { logger } from '../../lib/logger.js';
 import { normalizeEmail } from '../../utils/normalize.js';
-import { storeOrdersEnabled } from '../../config/env.js';
+import { ownerNotificationEmail, publicSiteUrl, storeOrdersEnabled, supportEmail } from '../../config/env.js';
 import { createOrderSchema } from '../../schemas/order.schema.js';
 import { isOrderNumber, reserveOrderNumber } from './orderNumber.js';
 import { canCustomerCancel, CANCELLATION_MESSAGES } from './cancellation.js';
@@ -22,6 +22,7 @@ import {
   type RefundOutcome,
 } from '../payments/refunds.js';
 import {
+  buildAdminOrderEmail,
   buildCancellationEmail,
   buildOrderConfirmedEmail,
   sendOrderEmail,
@@ -276,6 +277,68 @@ export const createOrder = asyncHandler(async (req: Request, res: Response) => {
         orderId: order.id,
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+
+    // Admin new-order notification — sent to the configured admin recipient.
+    // Best-effort: a failed admin email never fails the order (the order is
+    // already persisted). Idempotency key is distinct from the customer key.
+    const adminUrl = `${publicSiteUrl}/admin/orders/${order.id}`;
+    const adminRecipients = new Set<string>();
+    if (ownerNotificationEmail) adminRecipients.add(ownerNotificationEmail.trim());
+    // Also notify any additional admins from ADMIN_EMAILS if different.
+    // (ownerNotificationEmail already falls back to ADMIN_EMAIL, so this covers
+    //  the primary admin. Additional admins are notified via the same address
+    //  unless OWNER_NOTIFICATION_EMAIL is explicitly set.)
+
+    for (const recipient of adminRecipients) {
+      if (!recipient || recipient === order.email.trim()) continue; // skip if same as customer
+      try {
+        await sendOrderEmail({
+          orderId: order.id,
+          type: 'ORDER_CONFIRMED',
+          toEmail: recipient,
+          mail: buildAdminOrderEmail(
+            { ...toOrderContext(order), phone: order.phone, address: order.address },
+            {
+              paymentMethodLabel: 'Cash on Delivery',
+              adminUrl,
+            },
+          ),
+          idempotencyKey: `admin-confirm:${order.id}:${recipient}`,
+        });
+      } catch (error) {
+        logger.warn('admin_order_notification_failed', {
+          orderId: order.id,
+          recipient: recipient.replace(/(.{2}).*@/, '$1***@'),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // Business (support) notification — sent to SUPPORT_EMAIL if it differs
+    // from the admin recipient(s) above. Avoids duplicate emails.
+    const businessRecipient = supportEmail?.trim();
+    if (businessRecipient && !adminRecipients.has(businessRecipient) && businessRecipient !== order.email.trim()) {
+      try {
+        await sendOrderEmail({
+          orderId: order.id,
+          type: 'ORDER_CONFIRMED',
+          toEmail: businessRecipient,
+          mail: buildAdminOrderEmail(
+            { ...toOrderContext(order), phone: order.phone, address: order.address },
+            {
+              paymentMethodLabel: 'Cash on Delivery',
+              adminUrl,
+            },
+          ),
+          idempotencyKey: `business-confirm:${order.id}:${businessRecipient}`,
+        });
+      } catch (error) {
+        logger.warn('business_order_notification_failed', {
+          orderId: order.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 
