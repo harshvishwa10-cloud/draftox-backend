@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { isMailerReady, sendMail } from '../../lib/mailer.js';
 import { logger } from '../../lib/logger.js';
-import { isTest } from '../../config/env.js';
+import { isTest, publicSiteUrl, brevoConfigured } from '../../config/env.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { prisma } from '../../lib/prisma.js';
 import {
@@ -339,7 +339,9 @@ export interface SendOrderEmailParams {
 export async function sendOrderEmail(
   params: SendOrderEmailParams,
 ): Promise<DeliveryOutcome> {
-  const provider = isMailerReady ? 'smtp' : null;
+  // Record the transport that actually handled the message: Brevo's HTTP API
+  // takes precedence in sendMail() whenever BREVO_API_KEY is present.
+  const provider = isMailerReady ? (brevoConfigured ? 'brevo' : 'smtp') : null;
   const recipient = (params.toEmail ?? '').trim();
 
   let rowId: string;
@@ -431,7 +433,22 @@ export async function retryOrderNotification(
 ): Promise<DeliveryStatus> {
   const row = await prisma.orderNotification.findUnique({
     where: { id: notificationId },
-    include: { order: { select: { email: true, name: true, items: true, amount: true, currency: true, orderNumber: true } } },
+    include: {
+      order: {
+        select: {
+          email: true,
+          name: true,
+          items: true,
+          amount: true,
+          currency: true,
+          orderNumber: true,
+          subtotal: true,
+          createdAt: true,
+          phone: true,
+          address: true,
+        },
+      },
+    },
   });
   if (!row) {
     throw ApiError.notFound('Notification not found');
@@ -443,22 +460,46 @@ export async function retryOrderNotification(
   if (!recipient) return 'NO_RECIPIENT';
 
   const ctx = toOrderContext(row.order);
-  const mail: MailInput = { to: recipient, subject: row.subject, html: '', text: '' };
-
-  // Reproduction is content-dependent; the safest retry is a terse,
-  // accurate follow-up rather than re-inventing the original body.
   const orderNo = ctx.orderNumber ?? 'N/A';
-  const heading =
-    row.type === 'ORDER_CANCELLED'
-      ? `Your DRAFTOX order #${orderNo} was cancelled`
-      : row.type === 'RETURN_SUBMITTED'
-        ? 'Return request received'
-        : row.type === 'ORDER_CONFIRMED'
-          ? `Your DRAFTOX order #${orderNo} is confirmed`
-          : 'Update on your return request';
-  mail.subject = heading;
-  mail.html = renderLayout(heading, heading, `<p style="margin:0;">Please contact us on WhatsApp or reply to this email if you need help with your DRAFTOX order <strong>#${escapeHtml(orderNo)}</strong>.</p>`);
-  mail.text = `${heading}\n\nPlease contact us on WhatsApp or reply to this email if you need help with your DRAFTOX order #${orderNo}.\n\n- The DRAFTOX team`;
+
+  /*
+   * Admin/business notifications share the ORDER_CONFIRMED type but are
+   * addressed to an internal inbox rather than the customer. A retry for one of
+   * those must reproduce the internal new-order email — never the customer
+   * confirmation body (wrong audience, wrong content).
+   */
+  const isInternalRecipient =
+    row.type === 'ORDER_CONFIRMED' &&
+    recipient.toLowerCase() !== (row.order.email ?? '').trim().toLowerCase();
+
+  let mail: MailInput;
+  if (isInternalRecipient) {
+    mail = buildAdminOrderEmail(
+      { ...ctx, phone: row.order.phone, address: row.order.address },
+      {
+        paymentMethodLabel: 'Cash on Delivery',
+        adminUrl: `${publicSiteUrl}/admin/orders/${row.orderId}`,
+      },
+    );
+    mail.to = recipient;
+  } else {
+    // Reproduction is content-dependent; the safest retry is a terse,
+    // accurate follow-up rather than re-inventing the original body.
+    const heading =
+      row.type === 'ORDER_CANCELLED'
+        ? `Your DRAFTOX order #${orderNo} was cancelled`
+        : row.type === 'RETURN_SUBMITTED'
+          ? 'Return request received'
+          : row.type === 'ORDER_CONFIRMED'
+            ? `Your DRAFTOX order #${orderNo} is confirmed`
+            : 'Update on your return request';
+    mail = {
+      to: recipient,
+      subject: heading,
+      html: renderLayout(heading, heading, `<p style="margin:0;">Please contact us on WhatsApp or reply to this email if you need help with your DRAFTOX order <strong>#${escapeHtml(orderNo)}</strong>.</p>`),
+      text: `${heading}\n\nPlease contact us on WhatsApp or reply to this email if you need help with your DRAFTOX order #${orderNo}.\n\n- The DRAFTOX team`,
+    };
+  }
 
   const result = await sendMail(mail);
   await prisma.orderNotification.update({

@@ -257,89 +257,114 @@ export const createOrder = asyncHandler(async (req: Request, res: Response) => {
   // COD confirmation email — sent only AFTER the order is durably committed,
   // and never allowed to fail the request (the order already exists). Stable
   // idempotency key per order so a retry can never send a second copy.
+  //
+  // The customer, admin and business notifications are independent, so they run
+  // concurrently: three sequential provider round-trips would otherwise add
+  // their latency to the checkout response for no benefit.
   let emailOutcome: { status: string; sent: boolean; error: string | null } | null = null;
   if (isCod) {
-    try {
-      // Runs outside any DB transaction so a slow SMTP round-trip can never
-      // expire/roll back a transaction (the order is already durably committed).
-      const outcome = await sendOrderEmail({
-        orderId: order.id,
-        type: 'ORDER_CONFIRMED',
-        toEmail: order.email,
-        mail: buildOrderConfirmedEmail(toOrderContext(order), {
+    const adminUrl = `${publicSiteUrl}/admin/orders/${order.id}`;
+    const adminRecipients = new Set<string>();
+    if (ownerNotificationEmail) adminRecipients.add(ownerNotificationEmail.trim());
+
+    const internalMail = () =>
+      buildAdminOrderEmail(
+        { ...toOrderContext(order), phone: order.phone, address: order.address },
+        {
           paymentMethodLabel: 'Cash on Delivery',
-        }),
-        idempotencyKey: `confirm:${order.id}`,
-      });
-      emailOutcome = { status: outcome.status, sent: outcome.status === 'SENT', error: outcome.error };
-    } catch (error) {
-      logger.warn('cod_confirmation_email_failed', {
-        orderId: order.id,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+          adminUrl,
+        },
+      );
+
+    const tasks: Array<Promise<void>> = [];
+
+    // Customer confirmation. Runs outside any DB transaction so a slow provider
+    // round-trip can never expire/roll back a transaction (the order is already
+    // durably committed).
+    tasks.push(
+      (async () => {
+        try {
+          const outcome = await sendOrderEmail({
+            orderId: order.id,
+            type: 'ORDER_CONFIRMED',
+            toEmail: order.email,
+            mail: buildOrderConfirmedEmail(toOrderContext(order), {
+              paymentMethodLabel: 'Cash on Delivery',
+            }),
+            idempotencyKey: `confirm:${order.id}`,
+          });
+          emailOutcome = {
+            status: outcome.status,
+            sent: outcome.status === 'SENT',
+            error: outcome.error,
+          };
+        } catch (error) {
+          logger.warn('cod_confirmation_email_failed', {
+            orderId: order.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })(),
+    );
 
     // Admin new-order notification — sent to the configured admin recipient.
     // Best-effort: a failed admin email never fails the order (the order is
     // already persisted). Idempotency key is distinct from the customer key.
-    const adminUrl = `${publicSiteUrl}/admin/orders/${order.id}`;
-    const adminRecipients = new Set<string>();
-    if (ownerNotificationEmail) adminRecipients.add(ownerNotificationEmail.trim());
-    // Also notify any additional admins from ADMIN_EMAILS if different.
-    // (ownerNotificationEmail already falls back to ADMIN_EMAIL, so this covers
-    //  the primary admin. Additional admins are notified via the same address
-    //  unless OWNER_NOTIFICATION_EMAIL is explicitly set.)
-
+    // The recipient comes from trusted server-side config only
+    // (OWNER_NOTIFICATION_EMAIL, falling back to ADMIN_EMAIL); customer input
+    // can never influence it.
     for (const recipient of adminRecipients) {
       if (!recipient || recipient === order.email.trim()) continue; // skip if same as customer
-      try {
-        await sendOrderEmail({
-          orderId: order.id,
-          type: 'ORDER_CONFIRMED',
-          toEmail: recipient,
-          mail: buildAdminOrderEmail(
-            { ...toOrderContext(order), phone: order.phone, address: order.address },
-            {
-              paymentMethodLabel: 'Cash on Delivery',
-              adminUrl,
-            },
-          ),
-          idempotencyKey: `admin-confirm:${order.id}:${recipient}`,
-        });
-      } catch (error) {
-        logger.warn('admin_order_notification_failed', {
-          orderId: order.id,
-          recipient: recipient.replace(/(.{2}).*@/, '$1***@'),
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+      tasks.push(
+        (async () => {
+          try {
+            await sendOrderEmail({
+              orderId: order.id,
+              type: 'ORDER_CONFIRMED',
+              toEmail: recipient,
+              mail: internalMail(),
+              idempotencyKey: `admin-confirm:${order.id}:${recipient}`,
+            });
+          } catch (error) {
+            logger.warn('admin_order_notification_failed', {
+              orderId: order.id,
+              recipient: recipient.replace(/(.{2}).*@/, '$1***@'),
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        })(),
+      );
     }
 
     // Business (support) notification — sent to SUPPORT_EMAIL if it differs
     // from the admin recipient(s) above. Avoids duplicate emails.
     const businessRecipient = supportEmail?.trim();
-    if (businessRecipient && !adminRecipients.has(businessRecipient) && businessRecipient !== order.email.trim()) {
-      try {
-        await sendOrderEmail({
-          orderId: order.id,
-          type: 'ORDER_CONFIRMED',
-          toEmail: businessRecipient,
-          mail: buildAdminOrderEmail(
-            { ...toOrderContext(order), phone: order.phone, address: order.address },
-            {
-              paymentMethodLabel: 'Cash on Delivery',
-              adminUrl,
-            },
-          ),
-          idempotencyKey: `business-confirm:${order.id}:${businessRecipient}`,
-        });
-      } catch (error) {
-        logger.warn('business_order_notification_failed', {
-          orderId: order.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+    if (
+      businessRecipient &&
+      !adminRecipients.has(businessRecipient) &&
+      businessRecipient !== order.email.trim()
+    ) {
+      tasks.push(
+        (async () => {
+          try {
+            await sendOrderEmail({
+              orderId: order.id,
+              type: 'ORDER_CONFIRMED',
+              toEmail: businessRecipient,
+              mail: internalMail(),
+              idempotencyKey: `business-confirm:${order.id}:${businessRecipient}`,
+            });
+          } catch (error) {
+            logger.warn('business_order_notification_failed', {
+              orderId: order.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        })(),
+      );
     }
+
+    await Promise.all(tasks);
   }
 
   res.status(201).json({
