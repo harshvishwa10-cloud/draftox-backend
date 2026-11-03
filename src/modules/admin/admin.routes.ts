@@ -3,6 +3,8 @@ import { requireAdmin, requireAuth, requireSupportOrAdmin } from '../../middlewa
 import {
   getAdminOrder,
   listAdminOrders,
+  markOrderDelivered,
+  resendDeliveryConfirmationEmail,
   retryRefund,
   retryOrderEmail,
   retryShipmentNotification,
@@ -61,6 +63,12 @@ router.get('/orders', listAdminOrders);
 router.get('/orders/:id', getAdminOrder);
 router.patch('/orders/:id/fulfillment', updateOrderFulfillment);
 router.patch('/orders/:id/shipment', upsertOrderShipment);
+
+// Delivery confirmation (mark delivered) is a dedicated, admin-only action so
+// it can be idempotent, send the confirmation email exactly once, and never
+// auto-mark a COD order as paid.
+router.post('/orders/:id/deliver', markOrderDelivered);
+router.post('/orders/:id/delivery-confirmation/resend', resendDeliveryConfirmationEmail);
 
 // Notification management (admin-only).
 router.post('/notifications/:id/retry', retryShipmentNotification);

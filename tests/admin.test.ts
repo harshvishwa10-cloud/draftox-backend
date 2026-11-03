@@ -6,11 +6,11 @@ import type { Express } from 'express';
 import { createAgent, uniqueEmail, type AgentWithCsrf } from './helpers/agent.js';
 import {
   getAdminAgent,
+  createSessionAgent,
   ensureAdminUser,
-  loginAgent,
+  sessionAgentForEmail,
   ADMIN_EMAIL,
   ADMIN_NAME,
-  ADMIN_PASSWORD,
 } from './helpers/admin.js';
 
 const KEY_SECRET = 'dummy_key_secret_for_tests';
@@ -227,7 +227,7 @@ describe('single-admin policy', () => {
     await ensureAdminUser();
     await prisma.user.update({ where: { email: ADMIN_EMAIL }, data: { emailVerified: false } });
     try {
-      const unverified = await loginAgent(app, ADMIN_EMAIL, ADMIN_PASSWORD);
+      const unverified = await sessionAgentForEmail(app, ADMIN_EMAIL);
       const me = await unverified.agent.get('/api/v1/auth/me');
       expect(me.body.data.user.role).toBe('CUSTOMER');
       expect((await unverified.agent.get('/api/v1/admin/orders')).status).toBe(403);
@@ -238,7 +238,7 @@ describe('single-admin policy', () => {
 
   it('logging out clears the admin session immediately', async () => {
     await ensureAdminUser();
-    const admin = await loginAgent(app, ADMIN_EMAIL, ADMIN_PASSWORD);
+    const admin = await createSessionAgent(app);
     expect((await admin.agent.get('/api/v1/admin/orders')).status).toBe(200);
 
     const out = await admin.agent
@@ -494,11 +494,13 @@ describe('shipment tracking details', () => {
     await payOrder(user, order.id);
     const admin = await getAdminAgent(app);
 
-    const res = await admin.agent
-      .patch(`/api/v1/admin/orders/${order.id}/shipment`)
-      .set('X-CSRF-Token', admin.csrfToken)
-      .send({ trackingNumber: 'DLV1', trackingUrl: 'not-a-url' });
-    expect(res.status).toBe(422);
+    for (const trackingUrl of ['not-a-url', 'javascript:alert(1)', 'data:text/html,hi', '//evil.example/track']) {
+      const res = await admin.agent
+        .patch(`/api/v1/admin/orders/${order.id}/shipment`)
+        .set('X-CSRF-Token', admin.csrfToken)
+        .send({ trackingNumber: 'DLV1', trackingUrl });
+      expect(res.status, trackingUrl).toBe(422);
+    }
   });
 });
 

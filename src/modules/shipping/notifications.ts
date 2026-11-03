@@ -98,6 +98,45 @@ function formatDate(d: Date | string | null | undefined): string | null {
   return date.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+function formatDateTime(d: Date | string | null | undefined): string | null {
+  if (!d) return null;
+  const date = typeof d === 'string' ? new Date(d) : d;
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString('en-IN', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+/**
+ * Returns the URL only when it is an absolute HTTP(S) URL. Courier links are
+ * rendered inside customer emails and pages, so `javascript:`, `data:` and
+ * protocol-relative values must never become a clickable button.
+ */
+function safeHttpUrl(value: string | null | undefined): string | null {
+  const raw = (value ?? '').trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if ((url.protocol === 'http:' || url.protocol === 'https:') && url.hostname) return raw;
+  } catch {
+    // Fall through: unsafe/invalid URL.
+  }
+  return null;
+}
+
+export { safeHttpUrl };
+
+/** Signed-in customer order-details URL used by delivery emails. */
+function orderDetailsUrl(order: Pick<OrderInfo, 'orderNumber'>): string {
+  return order.orderNumber
+    ? `${publicSiteUrl}/my-orders/${encodeURIComponent(order.orderNumber)}`
+    : `${publicSiteUrl}/my-orders`;
+}
+
 function escapeHtml(value: string | null | undefined): string {
   if (!value) return '';
   return value
@@ -158,12 +197,22 @@ ${bodyHtml}
 </html>`;
 }
 
-function trackingButton(url: string): string {
+function actionButton(url: string, label: string): string {
   return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:16px 0 8px;">
 <tr><td style="border-radius:8px;background:${ACCENT};">
-<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;font-family:${FONT};font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;">Track your order</a>
+<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;font-family:${FONT};font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;">${escapeHtml(label)}</a>
 </td></tr>
 </table>`;
+}
+
+/** Prominent courier tracking button — only called with a validated HTTP(S) URL. */
+function trackingButton(url: string): string {
+  return actionButton(url, 'Track your parcel');
+}
+
+/** Always-safe button back to the customer's DRAFTOX order. */
+function orderDetailsButton(order: Pick<OrderInfo, 'orderNumber'>): string {
+  return actionButton(orderDetailsUrl(order), 'View order details');
 }
 
 function detailRow(label: string, value: string): string {
@@ -200,19 +249,23 @@ function itemsTable(order: Pick<OrderInfo, 'items' | 'currency'>): string {
 export { itemsTable };
 
 /**
- * Renders the INITIAL shipment email (sent once, automatically, when the first
- * shipment details are saved for a paid order).
+ * Renders the INITIAL delivery email (sent once, automatically, when the first
+ * delivery details are saved). The prominent tracking button is only rendered
+ * when the admin supplied a real HTTP(S) courier URL — never a fabricated or
+ * unsafe link. The order-details button is always present.
  */
 export function buildInitialEmail(
   order: OrderInfo,
   shipment: ShipmentDetails,
   token: string,
 ): MailInput {
-  const trackingLink = trackingPageUrl(token);
   const orderNo = order.orderNumber ?? 'N/A';
   const courier = shipment.courierName ?? 'to be confirmed';
   const awb = shipment.trackingNumber ?? 'to be confirmed';
   const est = formatDate(shipment.estimatedDeliveryAt);
+  const courierUrl = safeHttpUrl(shipment.trackingUrl);
+  const note = (shipment.dispatchNotes ?? '').trim();
+  const trackingLink = trackingPageUrl(token);
 
   const details = detailTable([
     detailRow('Courier', courier),
@@ -220,34 +273,39 @@ export function buildInitialEmail(
     ...(est ? [detailRow('Estimated delivery', est)] : []),
   ]);
 
-  const courierLink = shipment.trackingUrl
-    ? `<p style="margin:8px 0 0;color:${MUTED};font-size:13px;">You can also follow it on the <a href="${escapeHtml(shipment.trackingUrl)}" target="_blank" rel="noopener noreferrer" style="color:${ACCENT};">courier&rsquo;s website</a>.</p>`
-    : '';
-
   const body = `<p style="margin:0 0 12px;">Hi ${escapeHtml(order.name)},</p>
 <p style="margin:0 0 12px;">Good news &mdash; your DRAFTOX order <strong>#${escapeHtml(orderNo)}</strong> is on its way.</p>
-<h2 style="margin:16px 0 6px;font-family:${FONT};font-size:15px;font-weight:700;color:${BRAND};">Package details</h2>
+${note ? `<p style="margin:12px 0;padding:12px 16px;background:#f9fafb;border-left:3px solid ${ACCENT};border-radius:4px;color:${TEXT};">${escapeHtml(note)}</p>` : ''}
+<h2 style="margin:16px 0 6px;font-family:${FONT};font-size:15px;font-weight:700;color:${BRAND};">Delivery details</h2>
 ${details}
-${trackingButton(trackingLink)}
-${courierLink}
+${courierUrl ? trackingButton(courierUrl) : ''}
+${orderDetailsButton(order)}
+<p style="margin:8px 0 0;color:${MUTED};font-size:13px;">The estimated delivery date is provided by the delivery service and may change.</p>
+<p style="margin:8px 0 0;color:${MUTED};font-size:13px;">Live DRAFTOX delivery status: <a href="${escapeHtml(trackingLink)}" target="_blank" rel="noopener noreferrer" style="color:${ACCENT};">view tracking</a>.</p>
 <h2 style="margin:20px 0 6px;font-family:${FONT};font-size:15px;font-weight:700;color:${BRAND};">Items in this shipment</h2>
 ${itemsTable(order)}
 <p style="margin:20px 0 0;color:${MUTED};font-size:13px;">Thank you for shopping with DRAFTOX.</p>`;
 
   return {
     to: order.email,
-    subject: `Your DRAFTOX order #${orderNo} has shipped`,
-    html: renderLayout(`Your DRAFTOX order #${orderNo} has shipped`, `Order #${orderNo} has shipped`, body),
+    subject: `Your Draftox Order Is on Its Way \u2014 Order #${orderNo}`,
+    html: renderLayout(
+      `Your Draftox order #${orderNo} is on its way`,
+      `Order #${orderNo} is on its way`,
+      body,
+    ),
     text: `Hi ${order.name},
 
 Good news - your DRAFTOX order #${orderNo} is on its way.
-
-Package details
+${note ? `\n${note}\n` : ''}
+Delivery details
 Courier: ${courier}
 Tracking number: ${awb}
 ${est ? `Estimated delivery: ${est}\n` : ''}
-Track your order: ${trackingLink}
-${shipment.trackingUrl ? `Courier tracking: ${shipment.trackingUrl}\n` : ''}
+${courierUrl ? `Track your parcel: ${courierUrl}\n` : ''}
+View order details: ${orderDetailsUrl(order)}
+${courierUrl ? '' : `Live DRAFTOX delivery status: ${trackingLink}\n`}
+The estimated delivery date is provided by the delivery service and may change.
 Items in this shipment:
 ${formatItemsText(order)}
 
@@ -258,7 +316,8 @@ Need help? Email us at ${supportEmail}.
 }
 
 /**
- * Renders the UPDATE email (sent only when an admin explicitly triggers it).
+ * Renders the UPDATE delivery email (sent automatically when saved delivery
+ * details change, and on an explicit admin resend).
  */
 export function buildUpdateEmail(
   order: OrderInfo,
@@ -266,10 +325,12 @@ export function buildUpdateEmail(
   token: string,
   note: string | null,
 ): MailInput {
-  const trackingLink = trackingPageUrl(token);
   const orderNo = order.orderNumber ?? 'N/A';
   const dispatched = formatDate(shipment.dispatchedAt);
   const est = formatDate(shipment.estimatedDeliveryAt);
+  const courierUrl = safeHttpUrl(shipment.trackingUrl);
+  const customerNote = (note ?? shipment.dispatchNotes ?? '').trim();
+  const trackingLink = trackingPageUrl(token);
 
   const details = detailTable([
     detailRow('Courier', shipment.courierName ?? 'N/A'),
@@ -280,10 +341,13 @@ export function buildUpdateEmail(
 
   const body = `<p style="margin:0 0 12px;">Hi ${escapeHtml(order.name)},</p>
 <p style="margin:0 0 12px;">There is an update on your DRAFTOX order <strong>#${escapeHtml(orderNo)}</strong>.</p>
-${note ? `<p style="margin:12px 0;padding:12px 16px;background:#f9fafb;border-left:3px solid ${ACCENT};border-radius:4px;color:${TEXT};">${escapeHtml(note)}</p>` : ''}
-<h2 style="margin:16px 0 6px;font-family:${FONT};font-size:15px;font-weight:700;color:${BRAND};">Latest tracking details</h2>
+${customerNote ? `<p style="margin:12px 0;padding:12px 16px;background:#f9fafb;border-left:3px solid ${ACCENT};border-radius:4px;color:${TEXT};">${escapeHtml(customerNote)}</p>` : ''}
+<h2 style="margin:16px 0 6px;font-family:${FONT};font-size:15px;font-weight:700;color:${BRAND};">Latest delivery details</h2>
 ${details}
-${trackingButton(trackingLink)}
+${courierUrl ? trackingButton(courierUrl) : ''}
+${orderDetailsButton(order)}
+<p style="margin:8px 0 0;color:${MUTED};font-size:13px;">The estimated delivery date is provided by the delivery service and may change.</p>
+<p style="margin:8px 0 0;color:${MUTED};font-size:13px;">Live DRAFTOX delivery status: <a href="${escapeHtml(trackingLink)}" target="_blank" rel="noopener noreferrer" style="color:${ACCENT};">view tracking</a>.</p>
 <h2 style="margin:20px 0 6px;font-family:${FONT};font-size:15px;font-weight:700;color:${BRAND};">Your items</h2>
 ${itemsTable(order)}
 <p style="margin:20px 0 0;color:${MUTED};font-size:13px;">Thank you for shopping with DRAFTOX.</p>`;
@@ -295,15 +359,75 @@ ${itemsTable(order)}
     text: `Hi ${order.name},
 
 There is an update on your DRAFTOX order #${orderNo}.
-${note ? `\n${note}\n` : ''}
-Latest tracking details
+${customerNote ? `\n${customerNote}\n` : ''}
+Latest delivery details
 Courier: ${shipment.courierName ?? 'N/A'}
 Tracking number: ${shipment.trackingNumber ?? 'N/A'}
 ${dispatched ? `Dispatched: ${dispatched}\n` : ''}
 ${est ? `Estimated delivery: ${est}\n` : ''}
-Track your order: ${trackingLink}
+${courierUrl ? `Track your parcel: ${courierUrl}\n` : ''}
+View order details: ${orderDetailsUrl(order)}
+The estimated delivery date is provided by the delivery service and may change.
 
 Your items:
+${formatItemsText(order)}
+
+Need help? Email us at ${supportEmail}.
+
+- The DRAFTOX team`,
+  };
+}
+
+/**
+ * Renders the delivery-confirmation email, sent only after an admin has
+ * confirmed the parcel was actually delivered. The timestamp is the one stored
+ * by the backend — never a client-supplied or estimated date.
+ */
+export function buildDeliveryConfirmedEmail(
+  order: OrderInfo,
+  shipment: ShipmentDetails,
+  deliveredAt: Date | string,
+): MailInput {
+  const orderNo = order.orderNumber ?? 'N/A';
+  const delivered = formatDateTime(deliveredAt) ?? 'Recorded by DRAFTOX';
+
+  const details = detailTable([
+    detailRow('Order number', `#${orderNo}`),
+    detailRow('Delivered on', delivered),
+    ...(shipment.courierName ? [detailRow('Courier', shipment.courierName)] : []),
+    ...(shipment.trackingNumber ? [detailRow('Tracking number', shipment.trackingNumber)] : []),
+  ]);
+
+  const body = `<p style="margin:0 0 12px;">Hi ${escapeHtml(order.name)},</p>
+<p style="margin:0 0 12px;">Your DRAFTOX order <strong>#${escapeHtml(orderNo)}</strong> has been marked as delivered. We hope you enjoy your purchase.</p>
+<h2 style="margin:16px 0 6px;font-family:${FONT};font-size:15px;font-weight:700;color:${BRAND};">Delivery confirmed</h2>
+${details}
+${orderDetailsButton(order)}
+<h2 style="margin:20px 0 6px;font-family:${FONT};font-size:15px;font-weight:700;color:${BRAND};">Items delivered</h2>
+${itemsTable(order)}
+<p style="margin:20px 0 0;color:${MUTED};font-size:13px;">If anything is not right with your order, reply to this email or contact us at ${escapeHtml(supportEmail)}.</p>
+<p style="margin:8px 0 0;color:${MUTED};font-size:13px;">Thank you for shopping with DRAFTOX.</p>`;
+
+  return {
+    to: order.email,
+    subject: `Your Draftox Order Has Been Delivered \u2014 Order #${orderNo}`,
+    html: renderLayout(
+      `Your Draftox order #${orderNo} has been delivered`,
+      'Your product has been delivered!',
+      body,
+    ),
+    text: `Hi ${order.name},
+
+Your DRAFTOX order #${orderNo} has been marked as delivered. We hope you enjoy your purchase.
+
+Delivery confirmed
+Order number: #${orderNo}
+Delivered on: ${delivered}
+${shipment.courierName ? `Courier: ${shipment.courierName}\n` : ''}
+${shipment.trackingNumber ? `Tracking number: ${shipment.trackingNumber}\n` : ''}
+View order details: ${orderDetailsUrl(order)}
+
+Items delivered:
 ${formatItemsText(order)}
 
 Need help? Email us at ${supportEmail}.
@@ -470,19 +594,33 @@ export async function sendUpdateShipmentEmail(
       // Reuse the earlier failed/pending row and retry it (no duplicate row).
       rowId = existing.id;
     } else {
-      const created = await prisma.shipmentNotification.create({
-        data: {
-          orderId,
-          shipmentId,
-          type: 'UPDATE',
-          status: 'PENDING',
-          toEmail: order.email,
-          provider,
-          idempotencyKey,
-        },
-        select: { id: true },
-      });
-      rowId = created.id;
+      try {
+        const created = await prisma.shipmentNotification.create({
+          data: {
+            orderId,
+            shipmentId,
+            type: 'UPDATE',
+            status: 'PENDING',
+            toEmail: order.email,
+            provider,
+            idempotencyKey,
+          },
+          select: { id: true },
+        });
+        rowId = created.id;
+      } catch (err) {
+        // A concurrent duplicate request created this exact key first.
+        if (!isPrismaUniqueViolation(err)) throw err;
+        const after = await prisma.shipmentNotification.findUnique({
+          where: { idempotencyKey },
+          select: { id: true, status: true },
+        });
+        if (after?.status === 'SENT') {
+          return { status: 'ALREADY_SENT', notificationId: after.id, messageId: null, error: null };
+        }
+        if (!after?.id) throw err;
+        rowId = after.id;
+      }
     }
   } else {
     const created = await prisma.shipmentNotification.create({
@@ -547,6 +685,124 @@ export async function sendUpdateShipmentEmail(
 }
 
 /**
+ * Sends the delivery-confirmation email after an admin has confirmed delivery.
+ * Idempotent per order: the default key (`delivery-confirmed:<orderId>`) means a
+ * repeated/duplicated request never sends a second automatic confirmation. A
+ * deliberate admin resend supplies a fresh key. The delivery status has already
+ * been committed by the caller — a failure here never rolls it back.
+ */
+export async function sendDeliveryConfirmationEmail(
+  orderId: string,
+  order: OrderInfo,
+  shipment: ShipmentDetails,
+  deliveredAt: Date,
+  idempotencyKey: string | null = null,
+): Promise<DeliveryOutcome> {
+  const key = idempotencyKey ?? `delivery-confirmed:${orderId}`;
+  const provider = isMailerReady ? (brevoConfigured ? 'brevo' : 'smtp') : null;
+  let rowId: string;
+  let isNew = false;
+
+  const existing = await prisma.shipmentNotification.findUnique({
+    where: { idempotencyKey: key },
+    select: { id: true, status: true },
+  });
+
+  if (existing) {
+    if (existing.status === 'SENT') {
+      return { status: 'ALREADY_SENT', notificationId: existing.id, messageId: null, error: null };
+    }
+    rowId = existing.id;
+  } else {
+    try {
+      const created = await prisma.shipmentNotification.create({
+        data: {
+          orderId,
+          type: 'DELIVERY_CONFIRMED',
+          status: 'PENDING',
+          toEmail: order.email,
+          provider,
+          idempotencyKey: key,
+        },
+        select: { id: true },
+      });
+      rowId = created.id;
+      isNew = true;
+    } catch (err) {
+      if (isPrismaUniqueViolation(err)) {
+        const after = await prisma.shipmentNotification.findUnique({
+          where: { idempotencyKey: key },
+          select: { id: true, status: true },
+        });
+        if (after?.status === 'SENT') {
+          return { status: 'ALREADY_SENT', notificationId: after.id, messageId: null, error: null };
+        }
+        if (!after?.id) throw err;
+        rowId = after.id;
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  const recipient = (order.email ?? '').trim();
+  if (!recipient) {
+    await prisma.shipmentNotification.update({
+      where: { id: rowId },
+      data: { status: 'FAILED', error: 'The order has no customer email address.' },
+    });
+    return {
+      status: 'NO_RECIPIENT',
+      notificationId: rowId,
+      messageId: null,
+      error: 'The order has no customer email address.',
+    };
+  }
+
+  if (!isMailerReady) {
+    logger.warn('mail_delivery_confirmed_skipped_provider_not_configured', {
+      orderId,
+      notificationId: rowId,
+    });
+    return {
+      status: 'NOT_CONFIGURED',
+      notificationId: rowId,
+      messageId: null,
+      error: 'Email delivery is not configured on the server.',
+    };
+  }
+
+  logger.info('mail_delivery_confirmed_send', { orderId, notificationId: rowId, isNew });
+  const result = await doSend(buildDeliveryConfirmedEmail(order, shipment, deliveredAt));
+
+  await prisma.shipmentNotification.update({
+    where: { id: rowId },
+    data: {
+      status: result.accepted ? 'SENT' : 'FAILED',
+      messageId: result.messageId,
+      error: result.error,
+      sentAt: result.accepted ? new Date() : undefined,
+      attempts: { increment: 1 },
+    },
+  });
+
+  if (!result.accepted && !isTest) {
+    logger.warn('mail_delivery_confirmed_failed', {
+      orderId,
+      notificationId: rowId,
+      error: result.error,
+    });
+  }
+
+  return {
+    status: result.accepted ? 'SENT' : 'FAILED',
+    notificationId: rowId,
+    messageId: result.messageId,
+    error: result.error,
+  };
+}
+
+/**
  * Re-attempts a single PENDING or FAILED notification by id. A notification
  * that was already accepted (SENT) is NEVER re-sent — this is the guard against
  * duplicate emails from repeated admin retries. Returns a truthful status.
@@ -585,11 +841,15 @@ export async function retryNotification(
       dispatchNotes: true,
       dispatchedAt: true,
       estimatedDeliveryAt: true,
+      deliveredAt: true,
       trackingToken: true,
     },
   });
-  if (!shipment?.trackingToken) {
-    throw ApiError.notFound('Shipment or tracking token not found');
+  if (!shipment) {
+    throw ApiError.notFound('Shipment not found');
+  }
+  if (row.type !== 'DELIVERY_CONFIRMED' && !shipment.trackingToken) {
+    throw ApiError.notFound('Shipment tracking token not found');
   }
 
   const orderInfo: OrderInfo = {
@@ -610,10 +870,19 @@ export async function retryNotification(
     estimatedDeliveryAt: shipment.estimatedDeliveryAt,
   };
 
-  const email =
-    row.type === 'INITIAL'
-      ? buildInitialEmail(orderInfo, shipmentDetails, shipment.trackingToken)
-      : buildUpdateEmail(orderInfo, shipmentDetails, shipment.trackingToken, null);
+  let email: MailInput;
+  if (row.type === 'INITIAL') {
+    email = buildInitialEmail(orderInfo, shipmentDetails, shipment.trackingToken!);
+  } else if (row.type === 'UPDATE') {
+    email = buildUpdateEmail(orderInfo, shipmentDetails, shipment.trackingToken!, null);
+  } else {
+    if (!shipment.deliveredAt) {
+      throw ApiError.conflict(
+        'This delivery-confirmation email has no recorded delivery timestamp to send.',
+      );
+    }
+    email = buildDeliveryConfirmedEmail(orderInfo, shipmentDetails, shipment.deliveredAt);
+  }
 
   const result = await doSend(email);
   await prisma.shipmentNotification.update({

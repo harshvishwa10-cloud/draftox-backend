@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
@@ -6,6 +7,8 @@ import { ApiError } from '../../utils/ApiError.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import {
   adminOrderListQuerySchema,
+  deliverOrderSchema,
+  resendDeliveryEmailSchema,
   updateFulfillmentSchema,
   upsertShipmentSchema,
 } from '../../schemas/admin.schema.js';
@@ -342,15 +345,86 @@ function buildShipmentData(input: ShipmentData): ShipmentData {
   return data;
 }
 
+/** Delivery-relevant shipment fields, used for change detection + fingerprints. */
+const SHIPMENT_FIELDS = [
+  'courierName',
+  'trackingNumber',
+  'trackingUrl',
+  'dispatchNotes',
+  'dispatchedAt',
+  'estimatedDeliveryAt',
+] as const;
+
+interface ShipmentValues {
+  courierName: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  dispatchNotes: string | null;
+  dispatchedAt: Date | null;
+  estimatedDeliveryAt: Date | null;
+}
+
+function shipmentValues(row: ShipmentValues | null): ShipmentValues {
+  return {
+    courierName: row?.courierName ?? null,
+    trackingNumber: row?.trackingNumber ?? null,
+    trackingUrl: row?.trackingUrl ?? null,
+    dispatchNotes: row?.dispatchNotes ?? null,
+    dispatchedAt: row?.dispatchedAt ?? null,
+    estimatedDeliveryAt: row?.estimatedDeliveryAt ?? null,
+  };
+}
+
+/** Field-by-field comparison; Date objects are compared by timestamp. */
+function shipmentFieldValuesEqual(
+  left: string | Date | null,
+  right: string | Date | null,
+): boolean {
+  if (left instanceof Date || right instanceof Date) {
+    const lt = left instanceof Date ? left.getTime() : null;
+    const rt = right instanceof Date ? right.getTime() : null;
+    return lt === rt;
+  }
+  return left === right;
+}
+
+function shipmentValuesEqual(a: ShipmentValues, b: ShipmentValues): boolean {
+  return SHIPMENT_FIELDS.every((field) => shipmentFieldValuesEqual(a[field], b[field]));
+}
+
+/**
+ * Stable fingerprint of a previous→next transition. Two concurrent/duplicate
+ * saves that apply the same change produce the same idempotency key, so the
+ * email outbox can never send a second copy. Changing the shipment again — or
+ * reverting it — produces a different key and a genuine update email.
+ */
+function shipmentChangeFingerprint(prev: ShipmentValues, next: ShipmentValues): string {
+  const serialise = (values: ShipmentValues) => ({
+    courierName: values.courierName,
+    trackingNumber: values.trackingNumber,
+    trackingUrl: values.trackingUrl,
+    dispatchNotes: values.dispatchNotes,
+    dispatchedAt: values.dispatchedAt?.toISOString() ?? null,
+    estimatedDeliveryAt: values.estimatedDeliveryAt?.toISOString() ?? null,
+  });
+  return createHash('sha256')
+    .update(JSON.stringify({ prev: serialise(prev), next: serialise(next) }))
+    .digest('hex')
+    .slice(0, 40);
+}
+
 /**
  * Saves courier/tracking information for an order. No real courier booking is
  * made — this only records admin-supplied details. Requires verified payment
  * (a shipment on an unpaid order is not allowed) and a non-cancelled order.
  *
- * When this is the first shipment save for the order, a tracking token is
- * generated (stable for the lifetime of the shipment) and an INITIAL shipment
- * email is enqueued/sent automatically. Subsequent saves only update details;
- * no additional automatic email is sent unless an admin explicitly triggers one.
+ * The first save generates a stable tracking token and sends the INITIAL
+ * delivery email automatically. Later saves send an UPDATE email only when a
+ * delivery-relevant field actually changed; an identical re-save is a no-op
+ * (no event, no email). Saves are idempotent per change, so a double-click or a
+ * retried request can never send a duplicate email. Email delivery is attempted
+ * AFTER the details are committed — a provider failure never loses the saved
+ * details, and the failed notification stays retryable.
  */
 export const upsertOrderShipment = asyncHandler(async (req: Request, res: Response) => {
   const id = String(req.params.id ?? '');
@@ -366,50 +440,97 @@ export const upsertOrderShipment = asyncHandler(async (req: Request, res: Respon
 
   const data = buildShipmentData(input);
 
-  const shipment = await prisma.$transaction(async (tx) => {
-    // First load: determine whether we're creating (needs token) or updating.
+  const result = await prisma.$transaction(async (tx) => {
     const existing = await tx.shipment.findUnique({
       where: { orderId: id },
-      select: { id: true, trackingToken: true },
+      select: {
+        id: true,
+        trackingToken: true,
+        courierName: true,
+        trackingNumber: true,
+        trackingUrl: true,
+        dispatchNotes: true,
+        dispatchedAt: true,
+        estimatedDeliveryAt: true,
+      },
     });
 
     const isCreate = !existing || !existing.trackingToken;
-    const trackingToken = isCreate ? generateTrackingToken() : existing.trackingToken;
+    const prev = shipmentValues(existing);
+    const next: ShipmentValues = {
+      courierName: input.courierName !== undefined ? input.courierName : prev.courierName,
+      trackingNumber:
+        input.trackingNumber !== undefined ? input.trackingNumber : prev.trackingNumber,
+      trackingUrl: input.trackingUrl !== undefined ? input.trackingUrl : prev.trackingUrl,
+      dispatchNotes: input.dispatchNotes !== undefined ? input.dispatchNotes : prev.dispatchNotes,
+      dispatchedAt: input.dispatchedAt !== undefined ? input.dispatchedAt : prev.dispatchedAt,
+      estimatedDeliveryAt:
+        input.estimatedDeliveryAt !== undefined
+          ? input.estimatedDeliveryAt
+          : prev.estimatedDeliveryAt,
+    };
+    const changed = isCreate || !shipmentValuesEqual(prev, next);
 
-    const saved = await tx.shipment.upsert({
-      where: { orderId: id },
-      create: {
-        orderId: id,
-        courierName: input.courierName ?? null,
-        trackingNumber: input.trackingNumber ?? null,
-        trackingUrl: input.trackingUrl ?? null,
-        dispatchNotes: input.dispatchNotes ?? null,
-        dispatchedAt: input.dispatchedAt ?? null,
-        estimatedDeliveryAt: input.estimatedDeliveryAt ?? null,
-        trackingToken,
-        trackingTokenCreatedAt: isCreate ? new Date() : null,
-      },
-      update: {
-        ...data,
-        trackingToken: undefined,
-        trackingTokenCreatedAt: undefined,
-      },
-      select: shipmentSelect,
-    });
+    // Nothing changed: leave the stored row (and its updatedAt) untouched and
+    // send no email. This is what makes repeated submissions harmless.
+    if (!changed) {
+      const unchanged = await tx.shipment.findUniqueOrThrow({
+        where: { orderId: id },
+        select: shipmentSelect,
+      });
+      return {
+        shipment: unchanged,
+        isCreate,
+        changed: false,
+        prev,
+        next,
+        token: existing!.trackingToken!,
+        orderForEmail: null,
+      };
+    }
+
+    let token = existing?.trackingToken ?? null;
+    let saved;
+    if (!existing) {
+      token = generateTrackingToken();
+      saved = await tx.shipment.create({
+        data: {
+          orderId: id,
+          ...next,
+          trackingToken: token,
+          trackingTokenCreatedAt: new Date(),
+        },
+        select: shipmentSelect,
+      });
+    } else {
+      if (isCreate) token = generateTrackingToken();
+      saved = await tx.shipment.update({
+        where: { orderId: id },
+        data: isCreate
+          ? { ...data, trackingToken: token, trackingTokenCreatedAt: new Date() }
+          : data,
+        select: shipmentSelect,
+      });
+    }
+
+    const changedFields = SHIPMENT_FIELDS.filter(
+      (field) => !shipmentFieldValuesEqual(prev[field], next[field]),
+    );
 
     await tx.orderEvent.create({
       data: {
         orderId: id,
         type: 'SHIPMENT_UPDATED',
-        message: input.trackingNumber
-          ? `Shipment details saved (AWB ${input.trackingNumber})`
-          : 'Shipment details updated',
+        message: isCreate
+          ? `Shipment details saved${next.trackingNumber ? ` (AWB ${next.trackingNumber})` : ''}`
+          : `Shipment details updated${next.trackingNumber ? ` (AWB ${next.trackingNumber})` : ''}`,
         actorId: req.user?.id ?? null,
         actorName: actorName(req),
         metadata: {
-          ...(input.courierName !== undefined ? { courierName: input.courierName } : {}),
-          ...(input.trackingNumber !== undefined ? { trackingNumber: input.trackingNumber } : {}),
-          ...(input.trackingUrl !== undefined ? { trackingUrl: input.trackingUrl } : {}),
+          changedFields,
+          ...(next.courierName !== null ? { courierName: next.courierName } : {}),
+          ...(next.trackingNumber !== null ? { trackingNumber: next.trackingNumber } : {}),
+          ...(next.trackingUrl !== null ? { trackingUrl: next.trackingUrl } : {}),
           ...(isCreate ? { trackingTokenIssued: true } : {}),
         },
       },
@@ -419,33 +540,36 @@ export const upsertOrderShipment = asyncHandler(async (req: Request, res: Respon
     // must never hold the DB transaction open (Prisma's default 5s interactive
     // timeout would expire mid-send and roll back the shipment). We capture the
     // recipient context here and send AFTER the transaction commits.
-    const orderForEmail = isCreate
-      ? await tx.order.findUnique({
-          where: { id },
-          select: {
-            orderNumber: true,
-            email: true,
-            name: true,
-            address: true,
-            items: true,
-            amount: true,
-            currency: true,
-          },
-        })
-      : null;
+    const orderForEmail = await tx.order.findUnique({
+      where: { id },
+      select: {
+        orderNumber: true,
+        email: true,
+        name: true,
+        address: true,
+        items: true,
+        amount: true,
+        currency: true,
+      },
+    });
 
-    return { shipment: saved, trackingToken: trackingToken!, orderForEmail };
+    return {
+      shipment: saved,
+      isCreate,
+      changed: true,
+      prev,
+      next,
+      token: token!,
+      orderForEmail,
+    };
   });
 
-  // Send the initial shipment email when a brand-new shipment with a tracking
-  // token was recorded. It is idempotent per order and never re-sent on later
-  // edits. It runs after commit so a slow provider can never roll back the
-  // shipment, and its truthful outcome is surfaced to the admin UI separately
-  // from the "shipment saved" result.
+  // Automatic customer email, attempted only AFTER the details are committed.
   let emailOutcome: DeliveryOutcome | null = null;
-  if (shipment.orderForEmail) {
-    const { sendInitialShipmentEmail } = await import('../shipping/notifications.js');
-    const orderForEmail = shipment.orderForEmail;
+  let emailKind: 'INITIAL' | 'UPDATE' | 'NONE' = 'NONE';
+
+  if (result.changed && result.orderForEmail && result.token) {
+    const orderForEmail = result.orderForEmail;
     const orderInfo: OrderInfo = {
       orderNumber: orderForEmail.orderNumber,
       email: orderForEmail.email,
@@ -456,29 +580,64 @@ export const upsertOrderShipment = asyncHandler(async (req: Request, res: Respon
       currency: orderForEmail.currency ?? 'INR',
     };
     const shipmentDetails: ShipmentDetails = {
-      courierName: shipment.shipment.courierName,
-      trackingNumber: shipment.shipment.trackingNumber,
-      trackingUrl: shipment.shipment.trackingUrl,
-      dispatchNotes: shipment.shipment.dispatchNotes,
-      dispatchedAt: shipment.shipment.dispatchedAt,
-      estimatedDeliveryAt: shipment.shipment.estimatedDeliveryAt,
+      courierName: result.shipment.courierName,
+      trackingNumber: result.shipment.trackingNumber,
+      trackingUrl: result.shipment.trackingUrl,
+      dispatchNotes: result.shipment.dispatchNotes,
+      dispatchedAt: result.shipment.dispatchedAt,
+      estimatedDeliveryAt: result.shipment.estimatedDeliveryAt,
     };
-    emailOutcome = await sendInitialShipmentEmail(
-      id,
-      orderInfo,
-      shipmentDetails,
-      shipment.trackingToken,
-    );
+
+    const notifications = await import('../shipping/notifications.js');
+    if (result.isCreate) {
+      emailKind = 'INITIAL';
+      emailOutcome = await notifications.sendInitialShipmentEmail(
+        id,
+        orderInfo,
+        shipmentDetails,
+        result.token,
+      );
+    } else {
+      emailKind = 'UPDATE';
+      const idempotencyKey = `shipment-update:${id}:${shipmentChangeFingerprint(
+        result.prev,
+        result.next,
+      )}`;
+      emailOutcome = await notifications.sendUpdateShipmentEmail(
+        id,
+        shipmentDetails,
+        result.token,
+        orderInfo,
+        null,
+        result.shipment.id,
+        idempotencyKey,
+      );
+    }
   }
 
   // Shipment saving and email delivery are reported separately and truthfully.
-  // `initialEmailSent` is true ONLY when the provider accepted the message.
+  // `sent`/`initialEmailSent` are true ONLY when the provider accepted the
+  // message; the saved details are always retained.
   const email = emailOutcome;
+  const message = !result.changed
+    ? 'No delivery details changed — no customer email was sent.'
+    : email?.status === 'SENT'
+      ? 'Delivery details saved and the customer email was accepted by the provider.'
+      : email?.status === 'ALREADY_SENT'
+        ? 'Delivery details saved. This update was already emailed — no duplicate was sent.'
+        : email?.status === 'NOT_CONFIGURED'
+          ? 'Delivery details saved, but email delivery is not configured on the server.'
+          : email?.status === 'NO_RECIPIENT'
+            ? 'Delivery details saved, but this order has no customer email address.'
+            : 'Delivery details saved, but the customer email could not be sent. You can retry it.';
+
   res.status(200).json({
     success: true,
     data: {
-      shipment: shipment.shipment,
-      initialEmailSent: email?.status === 'SENT',
+      shipment: result.shipment,
+      changed: result.changed,
+      emailKind,
+      initialEmailSent: emailKind === 'INITIAL' && email?.status === 'SENT',
       email: email
         ? {
             status: email.status,
@@ -487,13 +646,13 @@ export const upsertOrderShipment = asyncHandler(async (req: Request, res: Respon
             error: email.error,
           }
         : {
-            // No automatic email is sent on later edits to an existing shipment.
             status: 'SKIPPED' as const,
             notificationId: null,
             sent: false,
             error: null,
           },
     },
+    message,
   });
 });
 
@@ -691,5 +850,316 @@ export const retryOrderEmail = asyncHandler(async (req: Request, res: Response) 
             : result === 'NO_RECIPIENT'
               ? 'This notification has no customer email address to send to.'
               : 'The email provider did not accept the message. Please try again later.',
+  });
+});
+
+/**
+ * Marks an order as delivered (admin-only). This is the explicit customer
+ * confirmation action: it stamps `Shipment.deliveredAt` once (creating a
+ * shipment record if the admin never saved courier details), advances
+ * `fulfillmentStatus` to `DELIVERED` directly for paid/COD orders, records a
+ * `DELIVERY_CONFIRMED` event, and sends the delivery-confirmation email after
+ * the commit. The email failure never rolls back delivery. Clicking again is
+ * idempotent and never sends a duplicate automatic confirmation.
+ */
+export const markOrderDelivered = asyncHandler(async (req: Request, res: Response) => {
+  const id = String(req.params.id ?? '');
+  const input = deliverOrderSchema.parse(req.body ?? {});
+
+  const current = await loadOrderForAdmin(id);
+  if (current.fulfillmentStatus === 'CANCELLED') {
+    throw ApiError.conflict('Cannot mark a cancelled order as delivered');
+  }
+  // Mirror the shipment gate: only verified payment or COD (CONFIRMED, unpaid)
+  // orders may be delivered/confirmed.
+  const codConfirmed = current.status === 'CONFIRMED' && current.paymentMethod === 'cod';
+  if (current.status !== 'PAID' && !codConfirmed) {
+    throw ApiError.conflict('Payment must be verified before marking the order as delivered');
+  }
+
+  const deliveredAt = new Date();
+
+  const committed = await prisma.$transaction(async (tx) => {
+    const order = await tx.order.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        orderNumber: true,
+        email: true,
+        name: true,
+        address: true,
+        items: true,
+        amount: true,
+        currency: true,
+        fulfillmentStatus: true,
+      },
+    });
+    if (!order) throw ApiError.notFound('Order not found');
+
+    // If it's already delivered, treat as idempotent (no double event/email).
+    if (order.fulfillmentStatus === 'DELIVERED') {
+      const existingShipment = await tx.shipment.findUnique({
+        where: { orderId: id },
+        select: shipmentSelect,
+      });
+      return {
+        alreadyDelivered: true,
+        order,
+        shipment: existingShipment,
+        deliveredAt: existingShipment?.deliveredAt ?? null,
+      } as const;
+    }
+
+    // A parcel that has been returned to DRAFTOX (or is in the refund flow)
+    // can never be newly marked as delivered.
+    const activeReturn = await tx.returnRequest.findFirst({
+      where: {
+        orderId: id,
+        status: {
+          in: ['ITEM_RECEIVED', 'REFUND_INITIATED', 'REFUND_COMPLETED', 'RESOLVED', 'CLOSED'],
+        },
+      },
+      select: { id: true },
+    });
+    if (activeReturn) {
+      throw ApiError.conflict('This order has an active return and cannot be marked as delivered');
+    }
+
+    // Atomically claim the delivery transition. A concurrent duplicate request
+    // loses this conditional update and is reported as already delivered, so
+    // only one DELIVERY_CONFIRMED event/email can be produced.
+    const claim = await tx.order.updateMany({
+      where: { id, fulfillmentStatus: { notIn: ['DELIVERED', 'CANCELLED'] } },
+      data: { fulfillmentStatus: 'DELIVERED' },
+    });
+    if (claim.count === 0) {
+      const after = await tx.order.findUnique({
+        where: { id },
+        select: { fulfillmentStatus: true },
+      });
+      if (after?.fulfillmentStatus === 'DELIVERED') {
+        const shipped = await tx.shipment.findUnique({
+          where: { orderId: id },
+          select: shipmentSelect,
+        });
+        return {
+          alreadyDelivered: true,
+          order,
+          shipment: shipped,
+          deliveredAt: shipped?.deliveredAt ?? null,
+        } as const;
+      }
+      throw ApiError.conflict('Cannot mark a cancelled order as delivered');
+    }
+
+    // Stamp deliveredAt once if a shipment exists; otherwise create a minimal
+    // shipment record so the delivery confirmation has a real timestamp.
+    const existingShipment = await tx.shipment.findUnique({
+      where: { orderId: id },
+      select: { id: true, deliveredAt: true, trackingToken: true },
+    });
+    if (existingShipment) {
+      if (!existingShipment.deliveredAt) {
+        await tx.shipment.update({
+          where: { orderId: id },
+          data: { deliveredAt },
+        });
+      }
+      if (!existingShipment.trackingToken) {
+        await tx.shipment.update({
+          where: { orderId: id },
+          data: { trackingToken: generateTrackingToken(), trackingTokenCreatedAt: new Date() },
+        });
+      }
+    } else {
+      await tx.shipment.create({
+        data: {
+          orderId: id,
+          deliveredAt,
+          trackingToken: generateTrackingToken(),
+          trackingTokenCreatedAt: new Date(),
+        },
+      });
+    }
+
+    // The conditional update above already advanced fulfilment. The generic map
+    // requires SHIPPED/OUT_FOR_DELIVERY, but an admin may confirm delivery from
+    // other paid/COD states — we enforce our own guards before this point.
+
+    await tx.orderEvent.create({
+      data: {
+        orderId: id,
+        type: 'DELIVERY_CONFIRMED',
+        message: input.note?.trim()
+          ? `Marked as delivered — ${input.note.trim()}`
+          : 'Marked as delivered',
+        actorId: req.user?.id ?? null,
+        actorName: actorName(req),
+        metadata: {
+          deliveredAt: deliveredAt.toISOString(),
+          ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+        },
+      },
+    });
+
+    const shipment = await tx.shipment.findUniqueOrThrow({
+      where: { orderId: id },
+      select: shipmentSelect,
+    });
+    return { alreadyDelivered: false, order, shipment, deliveredAt } as const;
+  });
+
+  // Send confirmation email AFTER commit; failure must not undo delivery.
+  let emailOutcome: DeliveryOutcome | null = null;
+  if (!committed.alreadyDelivered) {
+    const { sendDeliveryConfirmationEmail } = await import('../shipping/notifications.js');
+    const orderInfo: OrderInfo = {
+      orderNumber: committed.order.orderNumber,
+      email: committed.order.email,
+      name: committed.order.name,
+      address: committed.order.address as OrderInfo['address'],
+      items: committed.order.items as OrderInfo['items'],
+      amount: committed.order.amount,
+      currency: committed.order.currency ?? 'INR',
+    };
+    const shipmentDetails: ShipmentDetails = {
+      courierName: committed.shipment.courierName,
+      trackingNumber: committed.shipment.trackingNumber,
+      trackingUrl: committed.shipment.trackingUrl,
+      dispatchNotes: committed.shipment.dispatchNotes,
+      dispatchedAt: committed.shipment.dispatchedAt,
+      estimatedDeliveryAt: committed.shipment.estimatedDeliveryAt,
+    };
+    // Use the stored deliveredAt (set above) as the authoritative timestamp.
+    const when = committed.shipment.deliveredAt ?? committed.deliveredAt;
+    emailOutcome = await sendDeliveryConfirmationEmail(id, orderInfo, shipmentDetails, when);
+  } else {
+    // Already delivered — no automatic duplicate confirmation email.
+    emailOutcome = null;
+  }
+
+  const email = emailOutcome;
+  const storedDeliveredAt =
+    committed.shipment?.deliveredAt ??
+    (committed.deliveredAt instanceof Date ? committed.deliveredAt : null);
+  const message = committed.alreadyDelivered
+    ? 'Order already marked as delivered.'
+    : email?.status === 'SENT'
+      ? 'Order marked as delivered and confirmation email accepted by the provider.'
+      : email?.status === 'ALREADY_SENT'
+        ? 'Order marked as delivered. Confirmation email already sent.'
+        : email?.status === 'NOT_CONFIGURED'
+          ? 'Order marked as delivered, but email delivery is not configured on the server.'
+          : email?.status === 'NO_RECIPIENT'
+            ? 'Order marked as delivered, but this order has no customer email address.'
+            : 'Order marked as delivered, but the confirmation email could not be sent.';
+
+  res.status(200).json({
+    success: true,
+    data: {
+      orderId: id,
+      fulfillmentStatus: 'DELIVERED',
+      deliveredAt: storedDeliveredAt ? storedDeliveredAt.toISOString() : null,
+      alreadyDelivered: committed.alreadyDelivered,
+      shipment: committed.shipment,
+      email: email
+        ? {
+            status: email.status,
+            notificationId: email.notificationId,
+            sent: email.status === 'SENT',
+            error: email.error,
+          }
+        : {
+            status: 'SKIPPED' as const,
+            notificationId: null,
+            sent: false,
+            error: null,
+          },
+    },
+    message,
+  });
+});
+
+/**
+ * Resends the delivery-confirmation email for an already-delivered order.
+ * A deliberate admin resend uses a fresh idempotency key so it is never
+ * blocked by the automatic "once per order" key; SENT rows are still never
+ * duplicated.
+ */
+export const resendDeliveryConfirmationEmail = asyncHandler(async (req: Request, res: Response) => {
+  const id = String(req.params.id ?? '');
+  const input = resendDeliveryEmailSchema.parse(req.body ?? {});
+
+  const order = await prisma.order.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      orderNumber: true,
+      email: true,
+      name: true,
+      address: true,
+      items: true,
+      amount: true,
+      currency: true,
+      fulfillmentStatus: true,
+    },
+  });
+  if (!order) throw ApiError.notFound('Order not found');
+  if (order.fulfillmentStatus !== 'DELIVERED') {
+    throw ApiError.conflict('This order is not marked as delivered yet');
+  }
+
+  const shipment = await prisma.shipment.findUnique({
+    where: { orderId: id },
+    select: shipmentSelect,
+  });
+  if (!shipment?.deliveredAt) {
+    throw ApiError.conflict('No delivery timestamp is recorded for this order');
+  }
+
+  const { sendDeliveryConfirmationEmail } = await import('../shipping/notifications.js');
+  const orderInfo: OrderInfo = {
+    orderNumber: order.orderNumber,
+    email: order.email,
+    name: order.name,
+    address: order.address as OrderInfo['address'],
+    items: order.items as OrderInfo['items'],
+    amount: order.amount,
+    currency: order.currency ?? 'INR',
+  };
+  const shipmentDetails: ShipmentDetails = {
+    courierName: shipment.courierName,
+    trackingNumber: shipment.trackingNumber,
+    trackingUrl: shipment.trackingUrl,
+    dispatchNotes: shipment.dispatchNotes,
+    dispatchedAt: shipment.dispatchedAt,
+    estimatedDeliveryAt: shipment.estimatedDeliveryAt,
+  };
+
+  const key = input.idempotencyKey
+    ? `delivery-confirmed-resend:${id}:${input.idempotencyKey}`
+    : `delivery-confirmed-resend:${id}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+  const outcome = await sendDeliveryConfirmationEmail(
+    id,
+    orderInfo,
+    shipmentDetails,
+    shipment.deliveredAt,
+    key,
+  );
+
+  res.status(200).json({
+    success: true,
+    data: {
+      notificationId: outcome.notificationId,
+      status: outcome.status,
+      sent: outcome.status === 'SENT',
+      error: outcome.error,
+    },
+    message:
+      outcome.status === 'SENT'
+        ? 'Delivery confirmation email accepted by the provider.'
+        : outcome.status === 'ALREADY_SENT'
+          ? 'This confirmation email was already sent.'
+          : 'The delivery confirmation email could not be sent.',
   });
 });

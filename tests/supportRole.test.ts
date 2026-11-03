@@ -15,7 +15,7 @@ import {
   ensureAdminUser,
   getAdminAgent,
   getSupportAgent,
-  loginAgent,
+  sessionAgentForEmail,
 } from './helpers/admin.js';
 
 let app: Express;
@@ -156,7 +156,7 @@ describe('support role negative cases', () => {
     await ensureAdminUser(SUPPORT_EMAIL, SUPPORT_NAME, SUPPORT_PASSWORD);
     await prisma.user.update({ where: { email: SUPPORT_EMAIL }, data: { emailVerified: false } });
     try {
-      const support = await loginAgent(app, SUPPORT_EMAIL, SUPPORT_PASSWORD);
+      const support = await sessionAgentForEmail(app, SUPPORT_EMAIL);
       for (const route of SUPPORT_ALLOWED_GET) {
         expect((await support.agent.get(route)).status, route).toBe(403);
       }

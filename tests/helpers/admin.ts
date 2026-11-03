@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs';
 import type { Express } from 'express';
+import { generateToken, hashToken } from '../../src/utils/cookies.js';
 import { createAgent, type AgentWithCsrf } from './agent.js';
 
 /** Primary authorized administrator email (matches the server default). */
@@ -66,13 +67,67 @@ export async function loginAgent(
 
 let cached: Promise<Authed> | null = null;
 
+/**
+ * Mints a legacy session row directly and attaches its cookie to a fresh agent.
+ *
+ * Administrator and support addresses are "reserved privileged" identities that
+ * may only authenticate through Google/Firebase in production — password login
+ * is deliberately rejected for them. These helpers therefore reproduce what a
+ * successful provider sign-in leaves behind: a server-side session for an
+ * email-verified account. Authorization is still exercised for real by the
+ * middleware (email allow-list + verification), so tests never bypass it.
+ */
+async function createSessionForUser(userId: string): Promise<string> {
+  const { prisma } = await import('../../src/lib/prisma.js');
+  const token = generateToken(48);
+  await prisma.session.create({
+    data: {
+      tokenHash: hashToken(token),
+      userId,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  });
+  return token;
+}
+
+function attachSessionCookie(agent: AgentWithCsrf['agent'], token: string): void {
+  // Supertest exposes superagent's cookie jar at runtime but not in its types.
+  const jar = (agent as unknown as {
+    jar: { setCookie: (cookie: string, domain: string, path: string) => unknown };
+  }).jar;
+  jar.setCookie(`draftox_session=${encodeURIComponent(token)}; Path=/`, '127.0.0.1', '/');
+}
+
+/** Fresh provider-verified session for a privileged identity (not cached). */
+export async function createSessionAgent(
+  app: Express,
+  email: string = ADMIN_EMAIL,
+  name: string = ADMIN_NAME,
+  password: string = ADMIN_PASSWORD,
+): Promise<Authed> {
+  const userId = await ensureAdminUser(email, name, password);
+  const { agent, csrfToken } = await createAgent(app);
+  attachSessionCookie(agent, await createSessionForUser(userId));
+  return { agent, csrfToken, email, userId };
+}
+
+/**
+ * Session for an EXISTING user row, without touching its verification state.
+ * Used to simulate a stale provider session for an unverified privileged email.
+ */
+export async function sessionAgentForEmail(app: Express, email: string): Promise<Authed> {
+  const { prisma } = await import('../../src/lib/prisma.js');
+  const user = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+  if (!user) throw new Error(`No user row for ${email}`);
+  const { agent, csrfToken } = await createAgent(app);
+  attachSessionCookie(agent, await createSessionForUser(user.id));
+  return { agent, csrfToken, email, userId: user.id };
+}
+
 /** Shared authorized-admin agent (primary account) for a test file. */
 export function getAdminAgent(app: Express): Promise<Authed> {
   if (!cached) {
-    cached = (async () => {
-      await ensureAdminUser();
-      return loginAgent(app, ADMIN_EMAIL, ADMIN_PASSWORD);
-    })();
+    cached = createSessionAgent(app);
   }
   return cached;
 }
@@ -86,10 +141,7 @@ let cachedSupport: Promise<Authed> | null = null;
  */
 export function getSupportAgent(app: Express): Promise<Authed> {
   if (!cachedSupport) {
-    cachedSupport = (async () => {
-      await ensureAdminUser(SUPPORT_EMAIL, SUPPORT_NAME, SUPPORT_PASSWORD);
-      return loginAgent(app, SUPPORT_EMAIL, SUPPORT_PASSWORD);
-    })();
+    cachedSupport = createSessionAgent(app, SUPPORT_EMAIL, SUPPORT_NAME, SUPPORT_PASSWORD);
   }
   return cachedSupport;
 }

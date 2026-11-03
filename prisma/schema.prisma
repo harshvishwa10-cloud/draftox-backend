@@ -76,16 +76,21 @@ enum OrderEventType {
   RETURN_REQUESTED
   RETURN_REVIEWED
   RETURN_RESOLVED
+  /** Admin explicitly confirmed the parcel was delivered to the customer. */
+  DELIVERY_CONFIRMED
 }
 
 /**
  * Shipment email kinds. INITIAL is sent once, automatically, right after the
- * first shipment details are saved. UPDATE is sent only when an admin
- * explicitly requests a tracking update email.
+ * first shipment details are saved. UPDATE is sent automatically when saved
+ * delivery details change (and on explicit admin resend). DELIVERY_CONFIRMED is
+ * sent once, after an admin confirms actual delivery.
  */
 enum ShipmentNotificationType {
   INITIAL
   UPDATE
+  /** Sent once when an admin confirms the parcel was actually delivered. */
+  DELIVERY_CONFIRMED
 }
 
 /**

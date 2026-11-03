@@ -291,15 +291,56 @@ describe('shipment save reports email delivery truthfully', () => {
     expect(mailer.sendMail).not.toHaveBeenCalled();
   });
 
-  it('does not send an automatic email on later edits of the same shipment', async () => {
+  it('sends an automatic UPDATE only when delivery details actually change', async () => {
     const { order, admin } = await paidOrder();
     await saveShipment(admin, order.id, shipmentInput);
     expect(mailer.sendMail).toHaveBeenCalledTimes(1);
 
+    // An identical re-save is a no-op: no event, no email.
+    const same = await saveShipment(admin, order.id, shipmentInput);
+    expect(same.status).toBe(200);
+    expect(same.body.data.changed).toBe(false);
+    expect(same.body.data.emailKind).toBe('NONE');
+    expect(same.body.data.email.status).toBe('SKIPPED');
+    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+
+    // A real change emails the customer automatically.
     const second = await saveShipment(admin, order.id, { trackingNumber: 'DLV-EMAIL-2' });
     expect(second.status).toBe(200);
-    expect(second.body.data.email.status).toBe('SKIPPED');
+    expect(second.body.data.changed).toBe(true);
+    expect(second.body.data.emailKind).toBe('UPDATE');
+    expect(second.body.data.email.status).toBe('SENT');
+    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+    expect(mailer.sendMail.mock.calls[1][0].subject).toMatch(/update on your DRAFTOX order/i);
+
+    // Repeating the same values never sends a duplicate.
+    const repeat = await saveShipment(admin, order.id, { trackingNumber: 'DLV-EMAIL-2' });
+    expect(repeat.body.data.changed).toBe(false);
+    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+  });
+
+  it('reuses one UPDATE outbox row when the same change is submitted concurrently', async () => {
+    const { order, admin } = await paidOrder();
+    await saveShipment(admin, order.id, shipmentInput);
     expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+
+    const change = { trackingNumber: 'DLV-RACE-1', courierName: 'Delhivery' };
+    const [a, b] = await Promise.all([
+      saveShipment(admin, order.id, change),
+      saveShipment(admin, order.id, change),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+
+    // At most one additional email is sent, and the outbox never holds two
+    // UPDATE rows for the same transition.
+    expect(mailer.sendMail.mock.calls.length).toBeLessThanOrEqual(2);
+
+    const { prisma } = await import('../src/lib/prisma.js');
+    const updates = await prisma.shipmentNotification.count({
+      where: { orderId: order.id, type: 'UPDATE' },
+    });
+    expect(updates).toBeLessThanOrEqual(1);
   });
 });
 

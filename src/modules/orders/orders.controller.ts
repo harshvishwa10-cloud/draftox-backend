@@ -52,9 +52,12 @@ const orderSelect = {
       courierName: true,
       trackingNumber: true,
       trackingUrl: true,
+      dispatchNotes: true,
       dispatchedAt: true,
       estimatedDeliveryAt: true,
       deliveredAt: true,
+      createdAt: true,
+      updatedAt: true,
     },
   },
 } as const;

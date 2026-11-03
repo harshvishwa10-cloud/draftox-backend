@@ -234,7 +234,7 @@ describe('initial shipment email (idempotent)', () => {
     // An email was captured by the mock.
     expect(mailCalls.length).toBe(1);
     expect(mailCalls[0].to).toBe(order.email);
-    expect(mailCalls[0].subject).toContain('has shipped');
+    expect(mailCalls[0].subject).toMatch(/is on its way/i);
 
     // The notification row exists and is marked SENT.
     const { prisma } = await import('../src/lib/prisma.js');
@@ -248,7 +248,7 @@ describe('initial shipment email (idempotent)', () => {
     expect(notif!.provider).toBe('smtp');
   });
 
-  it('only ever creates one INITIAL notification per order', async () => {
+  it('creates one INITIAL and sends an automatic UPDATE when details change', async () => {
     const customer = await registerAgent('track-dedup');
     const order = await fileOrder(customer);
     await payOrder(customer, order.id);
@@ -256,14 +256,48 @@ describe('initial shipment email (idempotent)', () => {
     const admin = await getAdminAgent(app);
 
     await saveShipment(admin, order.id, { courierName: 'Delhivery', trackingNumber: 'DLV-001' });
+    expect(mailCalls.length).toBe(1);
+
+    // A genuinely changed re-save should notify the customer of the update.
     await saveShipment(admin, order.id, { courierName: 'DTDC', trackingNumber: 'DTDC-002' });
+    expect(mailCalls.length).toBe(2);
+    expect(mailCalls[1].subject).toMatch(/update on your DRAFTOX order/i);
 
     const { prisma } = await import('../src/lib/prisma.js');
-    const count = await prisma.shipmentNotification.count({
+    const initialCount = await prisma.shipmentNotification.count({
       where: { orderId: order.id, type: 'INITIAL' },
     });
-    expect(count).toBe(1);
-    // But the second save should NOT trigger another email.
+    expect(initialCount).toBe(1);
+    const updateCount = await prisma.shipmentNotification.count({
+      where: { orderId: order.id, type: 'UPDATE' },
+    });
+    expect(updateCount).toBe(1);
+  });
+
+  it('does not send an email when nothing changed', async () => {
+    const customer = await registerAgent('track-noop');
+    const order = await fileOrder(customer);
+    await payOrder(customer, order.id);
+
+    const admin = await getAdminAgent(app);
+
+    const first = await saveShipment(admin, order.id, {
+      courierName: 'Delhivery',
+      trackingNumber: 'DLV-NOOP',
+    });
+    expect(first.body.data.changed).toBe(true);
+    expect(first.body.data.emailKind).toBe('INITIAL');
+    expect(mailCalls.length).toBe(1);
+
+    const second = await saveShipment(admin, order.id, {
+      courierName: 'Delhivery',
+      trackingNumber: 'DLV-NOOP',
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.data.changed).toBe(false);
+    expect(second.body.data.emailKind).toBe('NONE');
+    expect(second.body.data.email.status).toBe('SKIPPED');
+    // An unchanged re-submit is a no-op: no duplicate email.
     expect(mailCalls.length).toBe(1);
   });
 });
