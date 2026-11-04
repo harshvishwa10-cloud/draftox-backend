@@ -322,9 +322,37 @@ const env = loadEnv();
 export const isProduction = env.NODE_ENV === 'production';
 export const isTest = env.NODE_ENV === 'test';
 
-export const corsOrigins = env.CORS_ORIGINS.split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
+/**
+ * Origins the official storefront is served from. Cloudflare Pages serves the
+ * production site on the custom domain `draftox.shop` (plus its `www` alias);
+ * the `*.pages.dev` hostnames are deployment aliases only. These are fixed,
+ * project-owned origins, so they are always trusted even if an operator forgets
+ * to list the custom domain in CORS_ORIGINS — otherwise every cookie/CSRF
+ * protected request (password sign-in, the Firebase Google exchange, checkout)
+ * is rejected with "Origin not allowed" while simple GETs keep working.
+ */
+const OFFICIAL_STOREFRONT_ORIGINS = ['https://draftox.shop', 'https://www.draftox.shop'] as const;
+
+function toOrigin(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value.trim()).origin;
+  } catch {
+    return null;
+  }
+}
+
+export const corsOrigins = [
+  ...new Set(
+    [
+      ...env.CORS_ORIGINS.split(',').map((origin) => toOrigin(origin)),
+      // The configured storefront origin is trusted by definition; keeping it in
+      // the allow-list prevents FRONTEND_URL/CORS_ORIGINS drift from breaking auth.
+      toOrigin(env.FRONTEND_URL),
+      ...OFFICIAL_STOREFRONT_ORIGINS,
+    ].filter((origin): origin is string => origin !== null),
+  ),
+];
 
 export const googleOAuthConfigured = Boolean(
   env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_CALLBACK_URL,
