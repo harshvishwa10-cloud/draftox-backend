@@ -49,6 +49,54 @@ export function effectiveUnitPrice(slug: string, catalogPrice: number): number {
 }
 
 /**
+ * TEMPORARY live-payment test pricing.
+ *
+ * The first storefront card (16-channel system) is priced at ₹10 for a real
+ * Razorpay test. Delivery is waived ONLY for an order made up entirely of that
+ * exact test price, so the payable amount is exactly ₹10 (1,000 paise). The
+ * waiver is anchored to the price, not a feature flag: restoring the catalogue
+ * price to ₹7,999 automatically removes it. Other products, other prices, and
+ * every order that mixes products keep the normal delivery rule.
+ */
+export const LIVE_TEST_PRICE_SLUG = 'draftox-16-channel';
+export const LIVE_TEST_UNIT_PRICE = 10;
+
+export interface PricedItemForDelivery {
+  slug: string;
+  unitPrice: number;
+}
+
+/** True only when every line is the 16-channel system at the ₹10 test price. */
+export function liveTestDeliveryWaived(items: ReadonlyArray<PricedItemForDelivery>): boolean {
+  return (
+    items.length > 0 &&
+    items.every(
+      (item) => item.slug === LIVE_TEST_PRICE_SLUG && item.unitPrice === LIVE_TEST_UNIT_PRICE,
+    )
+  );
+}
+
+/**
+ * Delivery fee for a real order. Identical to `deliveryFeeForSubtotal` except
+ * for the narrow, temporary ₹10 live-test order above.
+ */
+export function deliveryFeeForOrder(
+  subtotal: number,
+  items: ReadonlyArray<PricedItemForDelivery>,
+): number {
+  if (liveTestDeliveryWaived(items)) return 0;
+  return deliveryFeeForSubtotal(subtotal);
+}
+
+/** Total payable for a real order, using the same scoped delivery rule. */
+export function orderTotalForOrder(
+  subtotal: number,
+  items: ReadonlyArray<PricedItemForDelivery>,
+): number {
+  return Math.round((subtotal + deliveryFeeForOrder(subtotal, items)) * 100) / 100;
+}
+
+/**
  * True only when BOTH a non-production NODE_ENV and an explicit
  * `DEV_FREE_SHIPPING_ENABLED=true` are present. A local-only switch so the whole
  * payable total for the token-priced system can be tested end to end (₹10 price
