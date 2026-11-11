@@ -524,7 +524,10 @@ Handles `payment.captured`, `order.paid` (→ `PAID`) and `payment.failed`
 (→ `FAILED`, only from `REQUESTED`/`CONFIRMED`). Amount/currency are checked
 against the local order before marking paid; a mismatch is acknowledged with
 `data.handled: false, reason: "amount_mismatch"` and never marks paid. Duplicate
-and out-of-order deliveries are safe. `200` with `data.received` / `data.handled`.
+and out-of-order deliveries are safe: if `order.paid` (which carries no payment
+id) arrives before `payment.captured`, the later capture backfills the verified
+`razorpayPaymentId` on the already-PAID order exactly once. `200` with
+`data.received` / `data.handled`.
 
 Razorpay setup:
 

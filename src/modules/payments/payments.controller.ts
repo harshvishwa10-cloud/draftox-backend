@@ -190,6 +190,37 @@ async function processWebhookEvent(
         });
         return { handled: false, outcome: 'IGNORED', reason: 'duplicate_payment' };
       }
+      // Out-of-order delivery: `order.paid` carries no payment id and can arrive
+      // before `payment.captured`. Backfill the verified payment id exactly once
+      // so refunds/reconciliation can find it; a later DIFFERENT payment id is
+      // still a duplicate because it then hits the mismatch branch above.
+      if (parsed.razorpayPaymentId && !order.razorpayPaymentId) {
+        try {
+          await prisma.order.updateMany({
+            where: { id: order.id, razorpayPaymentId: null },
+            data: {
+              razorpayPaymentId: parsed.razorpayPaymentId,
+              ...(parsed.method ? { paymentMethod: parsed.method } : {}),
+            },
+          });
+        } catch (err) {
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+            await recordPaymentException({
+              kind: 'DUPLICATE_PAYMENT',
+              orderId: order.id,
+              razorpayOrderId: parsed.razorpayOrderId,
+              razorpayPaymentId: parsed.razorpayPaymentId,
+              amount: order.amount,
+              currency: order.currency,
+              reason: 'This payment id is already recorded on a different order.',
+              webhookEventId,
+              details: { source: 'webhook', backfill: true },
+            });
+            return { handled: false, outcome: 'IGNORED', reason: 'duplicate_payment' };
+          }
+          throw err;
+        }
+      }
       return { handled: true, outcome: 'PROCESSED' };
     }
 

@@ -543,6 +543,56 @@ describe('POST /api/v1/payments/razorpay/webhook', () => {
     expect(afterPaid.body.data.order.status).toBe('PAID');
   });
 
+  it('backfills the payment id when order.paid arrives before payment.captured', async () => {
+    const { agent } = await createAgent(app);
+    const { order, razorpayOrderId } = await setupOrderWithProviderId();
+
+    const orderPaidBody = JSON.stringify({
+      event: 'order.paid',
+      payload: {
+        order: { entity: { id: razorpayOrderId, amount: SEED_TOTAL * 100, currency: 'INR' } },
+      },
+    });
+    const orderPaidRes = await postWebhook(
+      agent,
+      orderPaidBody,
+      buildWebhookSignature(Buffer.from(orderPaidBody), WEBHOOK_SECRET),
+    );
+    expect(orderPaidRes.status).toBe(200);
+
+    const paymentId = uniqueId('pay');
+    const capturedBody = JSON.stringify({
+      event: 'payment.captured',
+      payload: {
+        payment: {
+          entity: {
+            id: paymentId,
+            order_id: razorpayOrderId,
+            amount: SEED_TOTAL * 100,
+            currency: 'INR',
+            status: 'captured',
+            method: 'upi',
+          },
+        },
+      },
+    });
+    const capturedRes = await postWebhook(
+      agent,
+      capturedBody,
+      buildWebhookSignature(Buffer.from(capturedBody), WEBHOOK_SECRET),
+    );
+    expect(capturedRes.status).toBe(200);
+
+    const { prisma } = await import('../src/lib/prisma.js');
+    const stored = await prisma.order.findUnique({
+      where: { id: order.id },
+      select: { status: true, razorpayPaymentId: true, paymentMethod: true },
+    });
+    expect(stored?.status).toBe('PAID');
+    expect(stored?.razorpayPaymentId).toBe(paymentId);
+    expect(stored?.paymentMethod).toBe('upi');
+  });
+
   it('ignores unknown events and unknown orders without error', async () => {
     const { agent } = await createAgent(app);
     const ignoredBody = JSON.stringify({ event: 'payment.authorized', payload: {} });
