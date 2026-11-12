@@ -110,19 +110,19 @@ describe('catalogue API while the override is active', () => {
 });
 
 describe('order pricing while the override is active', () => {
-  it('charges exactly ₹10 (delivery waived) on a 16-channel online order', async () => {
+  it('charges ₹10 + ₹110 = ₹120 on a 16-channel online order', async () => {
     const auth = await registerAgent('price-online');
     const order = await createOrder(auth, 'draftox-16-channel', 1);
     expect(Number(order.subtotal)).toBe(10);
-    expect(Number(order.amount)).toBe(10);
+    expect(Number(order.amount)).toBe(120);
     expect(order.status).toBe('REQUESTED');
   });
 
-  it('charges exactly ₹10 (delivery waived) on a 16-channel COD order', async () => {
+  it('charges ₹10 + ₹110 = ₹120 on a 16-channel COD order', async () => {
     const auth = await registerAgent('price-cod');
     const order = await createOrder(auth, 'draftox-16-channel', 1, 'cod');
     expect(Number(order.subtotal)).toBe(10);
-    expect(Number(order.amount)).toBe(10);
+    expect(Number(order.amount)).toBe(120);
     expect(order.status).toBe('CONFIRMED');
   });
 

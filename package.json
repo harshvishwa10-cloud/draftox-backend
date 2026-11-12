@@ -17,7 +17,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "scheduler": "tsx scripts/scheduler.ts",
-    "live-test-price": "tsx scripts/live-test-price.ts",
     "backup": "tsx scripts/backup-db.ts",
     "restore": "tsx scripts/restore-db.ts"
   },

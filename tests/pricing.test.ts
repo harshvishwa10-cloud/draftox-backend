@@ -1,18 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   FREE_DELIVERY_THRESHOLD,
-  LIVE_TEST_PRICE_SLUG,
-  LIVE_TEST_UNIT_PRICE,
   STANDARD_DELIVERY_FEE,
   TEST_PRICE_AMOUNT,
   TEST_PRICE_SLUG,
-  deliveryFeeForOrder,
   deliveryFeeForSubtotal,
   effectiveUnitPrice,
   estimatedDeliveryFrom,
   freeShippingOverrideEnabled,
-  liveTestDeliveryWaived,
-  orderTotalForOrder,
   orderTotalForSubtotal,
   testPriceOverrideEnabled,
 } from '../src/modules/orders/pricing.js';
@@ -49,42 +44,6 @@ describe('orderTotalForSubtotal', () => {
     expect(orderTotalForSubtotal(11999)).toBe(11999);
     expect(orderTotalForSubtotal(15998)).toBe(15998);
     expect(orderTotalForSubtotal(19999)).toBe(19999);
-  });
-});
-
-describe('temporary ₹10 live-test delivery waiver', () => {
-  const testItem = { slug: LIVE_TEST_PRICE_SLUG, unitPrice: LIVE_TEST_UNIT_PRICE };
-
-  it('waives delivery only for the exact ₹10 test item', () => {
-    expect(liveTestDeliveryWaived([testItem])).toBe(true);
-    expect(deliveryFeeForOrder(LIVE_TEST_UNIT_PRICE, [testItem])).toBe(0);
-    expect(orderTotalForOrder(LIVE_TEST_UNIT_PRICE, [testItem])).toBe(10);
-  });
-
-  it('does not waive delivery at the normal catalogue price', () => {
-    const normal = { slug: LIVE_TEST_PRICE_SLUG, unitPrice: 7999 };
-    expect(liveTestDeliveryWaived([normal])).toBe(false);
-    expect(deliveryFeeForOrder(7999, [normal])).toBe(STANDARD_DELIVERY_FEE);
-    expect(orderTotalForOrder(7999, [normal])).toBe(7999 + STANDARD_DELIVERY_FEE);
-  });
-
-  it('does not waive delivery when another product is in the order', () => {
-    const mixed = [testItem, { slug: 'draftox-24-channel', unitPrice: 100 }];
-    expect(liveTestDeliveryWaived(mixed)).toBe(false);
-    expect(deliveryFeeForOrder(110, mixed)).toBe(STANDARD_DELIVERY_FEE);
-  });
-
-  it('does not waive delivery for a different product at ₹10', () => {
-    const other = { slug: 'draftox-24-channel', unitPrice: 10 };
-    expect(liveTestDeliveryWaived([other])).toBe(false);
-    expect(deliveryFeeForOrder(10, [other])).toBe(STANDARD_DELIVERY_FEE);
-  });
-
-  it('ignores the legacy local-only env override', () => {
-    process.env.NODE_ENV = 'test';
-    process.env.DEV_FREE_SHIPPING_ENABLED = 'false';
-    expect(deliveryFeeForOrder(10, [testItem])).toBe(0);
-    expect(orderTotalForOrder(10, [testItem])).toBe(10);
   });
 });
 

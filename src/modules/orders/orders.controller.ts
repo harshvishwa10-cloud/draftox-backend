@@ -11,9 +11,9 @@ import { createOrderSchema } from '../../schemas/order.schema.js';
 import { isOrderNumber, reserveOrderNumber } from './orderNumber.js';
 import { canCustomerCancel, CANCELLATION_MESSAGES } from './cancellation.js';
 import {
-  deliveryFeeForOrder,
+  deliveryFeeForSubtotal,
   effectiveUnitPrice,
-  orderTotalForOrder,
+  orderTotalForSubtotal,
 } from './pricing.js';
 import {
   createRefundInTransaction,
@@ -192,8 +192,8 @@ export const createOrder = asyncHandler(async (req: Request, res: Response) => {
   // Delivery charge is derived from the server-side subtotal (never from the
   // browser): free above the threshold, a flat fee at or below it. The order
   // total is the single authoritative amount used for Razorpay and refunds.
-  const deliveryFee = deliveryFeeForOrder(subtotal, pricedItems);
-  const amount = orderTotalForOrder(subtotal, pricedItems);
+  const deliveryFee = deliveryFeeForSubtotal(subtotal);
+  const amount = orderTotalForSubtotal(subtotal);
 
   // Allocate the customer-facing number and insert the order in one
   // transaction so a rollback cannot leave a half-created order or a
