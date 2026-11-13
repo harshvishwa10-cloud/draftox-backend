@@ -3,8 +3,9 @@ import { env } from './config/env.js';
 import { closeCache } from './lib/cache.js';
 import { prisma } from './lib/prisma.js';
 import { logger } from './lib/logger.js';
-import { logEmailConfigDiagnostics } from './lib/mailer.js';
+import { logEmailConfigDiagnostics, probeEmailTransport, isMailerReady } from './lib/mailer.js';
 import { logPaymentsDiagnostics } from './modules/payments/payments.diagnostics.js';
+import { repairMissingPaidOrderNotifications } from './modules/orders/paidNotificationRepair.js';
 
 async function main(): Promise<void> {
   // Fail fast if the database is unreachable.
@@ -23,6 +24,30 @@ async function main(): Promise<void> {
       port: env.PORT,
       nodeEnv: env.NODE_ENV,
     });
+
+    /*
+     * Both post-listen jobs are fire-and-forget: readiness and request handling
+     * must never wait on (or fail because of) an email round-trip.
+     *
+     * 1. Auth-only transport probe — makes a broken mailbox visible in the boot
+     *    logs without sending mail.
+     * 2. Paid-order notification repair — dispatches the store-team email for
+     *    orders that became PAID while the trigger was missing (e.g. orders
+     *    paid before the online-paid hook shipped). It is idempotent and only
+     *    touches orders with no accepted internal notification.
+     */
+    void probeEmailTransport().catch(() => undefined);
+
+    // Render sets RENDER=true on every service, so the repair also runs if
+    // NODE_ENV was left unset there. Local dev DBs are never touched.
+    const deployed = env.NODE_ENV === 'production' || Boolean(process.env.RENDER);
+    if (!deployed) {
+      logger.info('paid_notification_repair_skipped_not_deployed');
+    } else if (!isMailerReady) {
+      logger.warn('paid_notification_repair_skipped_email_not_configured');
+    } else {
+      void repairMissingPaidOrderNotifications().catch(() => undefined);
+    }
   });
 
   let shuttingDown = false;

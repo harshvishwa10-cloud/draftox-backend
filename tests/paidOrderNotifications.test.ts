@@ -355,4 +355,53 @@ describe('online paid-order admin notifications', () => {
       expect(row.attempts).toBe(1);
     }
   });
+
+  it('boot repair notifies a PAID order whose trigger never ran, exactly once', async () => {
+    const auth = await registerAgent('paid-order-repair');
+    const order = await fileOrder(auth);
+    await createProviderOrder(auth, order.id, uniqueId('order'));
+    paymentId = uniqueId('pay');
+
+    // An unpaid order must never be picked up by the repair.
+    const unpaid = await fileOrder(auth);
+
+    const verify = await auth.agent
+      .post('/api/v1/payments/razorpay/verify')
+      .set('X-CSRF-Token', auth.csrfToken)
+      .send(verifyPayload(order.id));
+    expect(verify.status).toBe(200);
+    expect(brevoBodies()).toHaveLength(2);
+
+    const { prisma } = await import('../src/lib/prisma.js');
+    // Simulate the regression: the payment succeeded but no notification row
+    // was ever written (as with orders paid before the trigger shipped).
+    await prisma.orderNotification.deleteMany({ where: { orderId: order.id } });
+    expect(await prisma.orderNotification.count({ where: { orderId: order.id } })).toBe(0);
+
+    const { repairMissingPaidOrderNotifications } = await import(
+      '../src/modules/orders/paidNotificationRepair.js'
+    );
+    const repaired = await repairMissingPaidOrderNotifications({
+      orderIds: [order.id, unpaid.id],
+    });
+    // Only the PAID order is repaired.
+    expect(repaired.map((r) => r.orderId)).toEqual([order.id]);
+    expect(repaired[0]!.results.map((r) => r.status).sort()).toEqual(['SENT', 'SENT']);
+    expect(brevoBodies()).toHaveLength(4);
+
+    const rows = await prisma.orderNotification.findMany({ where: { orderId: order.id } });
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.status).toBe('SENT');
+      expect(row.idempotencyKey).toMatch(/^(admin|business)-paid:/);
+    }
+
+    // A second boot finds nothing to repair and sends no extra copy.
+    const again = await repairMissingPaidOrderNotifications({
+      orderIds: [order.id, unpaid.id],
+    });
+    expect(again).toEqual([]);
+    expect(brevoBodies()).toHaveLength(4);
+    expect(await prisma.orderNotification.count({ where: { orderId: order.id } })).toBe(2);
+  });
 });

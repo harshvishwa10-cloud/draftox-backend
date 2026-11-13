@@ -291,19 +291,44 @@ export function logEmailConfigDiagnostics(): void {
   }
 }
 
+/** True when the configured SMTP host is a Google mailbox (app-password rules apply). */
+function isGmailHost(host: string): boolean {
+  return /(?:^|\.)(gmail|googlemail)\.com$/i.test(host);
+}
+
+/**
+ * Normalises the SMTP credentials before they reach nodemailer.
+ *
+ * Two production-only failure modes made Gmail reject otherwise-correct
+ * settings: env values pasted with surrounding whitespace, and Google App
+ * Passwords copied in their displayed `xxxx xxxx xxxx xxxx` form. Gmail
+ * requires the 16 characters without spaces; a spaced value authenticates fine
+ * in a browser but fails SMTP with `535-5.7.8 BadCredentials`. Normalising here
+ * means an operator does not have to guess which form to paste.
+ */
+function smtpCredentials(host: string): { user: string; pass: string } {
+  const user = (env.SMTP_USER ?? '').trim();
+  let pass = (env.SMTP_PASS ?? '').trim();
+  if (isGmailHost(host)) pass = pass.replace(/\s+/g, '');
+  return { user, pass };
+}
+
 function createTransport() {
-  if (!env.SMTP_HOST || !env.SMTP_USER) {
+  const host = (env.SMTP_HOST ?? '').trim();
+  const rawUser = (env.SMTP_USER ?? '').trim();
+  if (!host || !rawUser) {
     throw new Error('SMTP is not configured (missing SMTP_HOST or SMTP_USER)');
   }
   const port = env.SMTP_PORT;
+  const { user, pass } = smtpCredentials(host);
   return nodemailer.createTransport({
-    host: env.SMTP_HOST,
+    host,
     port,
     // Port 465 = implicit TLS; 587/25/others = STARTTLS (nodemailer picks up automatically).
     secure: port === 465,
     auth: {
-      user: env.SMTP_USER,
-      pass: env.SMTP_PASS ?? '',
+      user,
+      pass,
     },
     // Bound every stage of the SMTP round-trip. Defaults are 2 min (connect),
     // 30s (greeting) and 10 min (socket idle) - far beyond the storefront
@@ -409,5 +434,73 @@ export async function sendMail(input: {
       messageId: null,
       error: safe.slice(0, 500),
     };
+  }
+}
+
+export interface EmailTransportProbeResult {
+  provider: 'none' | 'smtp' | 'brevo';
+  /** true = auth verified, false = auth/connection failed, null = not probeable. */
+  ok: boolean | null;
+  error: string | null;
+}
+
+/**
+ * Auth-only connectivity probe, run once after startup so a broken mailbox shows
+ * up in the deploy logs immediately instead of only when an order is placed.
+ *
+ * - Brevo (HTTP) has no side-effect-free auth endpoint, so nothing is probed.
+ * - SMTP runs `transporter.verify()`, which opens a real connection and
+ *   authenticates but exchanges no message: no email is sent, no DB row is
+ *   written and no order is touched.
+ *
+ * Never throws: a failed probe must not stop the server from starting (orders
+ * and payments must keep working even while email is broken). The error string
+ * is nodemailer/SMTP text such as `535-5.7.8 ... BadCredentials`; credentials
+ * are never logged.
+ */
+export async function probeEmailTransport(): Promise<EmailTransportProbeResult> {
+  if (!isMailerReady) {
+    logger.warn('email_transport_probe_skipped', { provider: 'none' });
+    return { provider: 'none', ok: null, error: 'Email delivery is not configured.' };
+  }
+
+  if (brevoConfigured) {
+    // No message is sent here; the first real send will surface a key problem.
+    logger.info('email_transport_probe_skipped', { provider: 'brevo' });
+    return { provider: 'brevo', ok: null, error: null };
+  }
+
+  const host = (env.SMTP_HOST ?? '').trim();
+  const port = env.SMTP_PORT;
+  const secure = port === 465;
+  const { user } = smtpCredentials(host);
+
+  let transport: ReturnType<typeof nodemailer.createTransport> | null = null;
+  try {
+    transport = createTransport();
+    await transport.verify();
+    logger.info('email_smtp_auth_verified', {
+      host,
+      port,
+      secure,
+      user: maskEmail(user),
+    });
+    return { provider: 'smtp', ok: true, error: null };
+  } catch (err) {
+    const safe = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').slice(0, 300);
+    logger.error('email_smtp_auth_failed', {
+      host,
+      port,
+      secure,
+      user: user ? maskEmail(user) : null,
+      error: safe,
+    });
+    return { provider: 'smtp', ok: false, error: safe };
+  } finally {
+    try {
+      transport?.close();
+    } catch {
+      // Closing a broken transport must never mask the probe result.
+    }
   }
 }
