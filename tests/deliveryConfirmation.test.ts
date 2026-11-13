@@ -162,6 +162,17 @@ async function outbox(orderId: string, type: 'DELIVERY_CONFIRMED' | 'INITIAL' | 
   });
 }
 
+/**
+ * Delivery-confirmation sends only. A verified online payment also dispatches
+ * the admin/business new-order notification, so assertions about the delivery
+ * email must not depend on the total number of mailer calls.
+ */
+function deliveryMails() {
+  return mailer.sendMail.mock.calls.filter((call) =>
+    /has been delivered/i.test((call[0] as { subject: string }).subject),
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Mark as delivered + confirmation email                              */
 /* ------------------------------------------------------------------ */
@@ -175,10 +186,10 @@ describe('mark order as delivered', () => {
     expect(res.body.data.fulfillmentStatus).toBe('DELIVERED');
     expect(res.body.data.alreadyDelivered).toBe(false);
     expect(res.body.data.email.status).toBe('SENT');
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(deliveryMails()).toHaveLength(1);
 
     // The email is a real confirmation addressed to the customer.
-    const call = mailer.sendMail.mock.calls[0][0] as {
+    const call = deliveryMails()[0][0] as {
       to: string;
       subject: string;
       html: string;
@@ -220,7 +231,7 @@ describe('mark order as delivered', () => {
     const { order, admin } = await paidOrder();
     const first = await markDelivered(admin, order.id);
     expect(first.status).toBe(200);
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(deliveryMails()).toHaveLength(1);
 
     const second = await markDelivered(admin, order.id);
     expect(second.status).toBe(200);
@@ -228,7 +239,7 @@ describe('mark order as delivered', () => {
     expect(second.body.data.email.status).toBe('SKIPPED');
     // A repeated click reports the persisted timestamp — never a fresh "now".
     expect(second.body.data.deliveredAt).toBe(first.body.data.deliveredAt);
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(deliveryMails()).toHaveLength(1);
 
     expect(await outbox(order.id, 'DELIVERY_CONFIRMED')).toHaveLength(1);
   });
@@ -245,7 +256,7 @@ describe('mark order as delivered', () => {
     // Exactly one caller did the real transition; the other is idempotent.
     const already = [a.body.data.alreadyDelivered, b.body.data.alreadyDelivered].sort();
     expect(already).toEqual([false, true]);
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(deliveryMails()).toHaveLength(1);
     expect(await outbox(order.id, 'DELIVERY_CONFIRMED')).toHaveLength(1);
   });
 
@@ -274,7 +285,7 @@ describe('mark order as delivered', () => {
       .set('X-CSRF-Token', admin.csrfToken);
     expect(retry.status).toBe(200);
     expect(retry.body.data.status).toBe('SENT');
-    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+    expect(deliveryMails()).toHaveLength(2);
   });
 
   it('never marks a COD order as paid when it is delivered', async () => {
@@ -293,10 +304,7 @@ describe('mark order as delivered', () => {
     expect(view.body.data.order.razorpayPaymentId).toBeFalsy();
     // Creating a COD order also sends the order-confirmation mails, so assert
     // on the delivery confirmation specifically rather than the total count.
-    const deliveryMails = mailer.sendMail.mock.calls.filter((call) =>
-      /has been delivered/i.test((call[0] as { subject: string }).subject),
-    );
-    expect(deliveryMails).toHaveLength(1);
+    expect(deliveryMails()).toHaveLength(1);
   });
 
   it('rejects a cancelled order', async () => {
@@ -309,7 +317,7 @@ describe('mark order as delivered', () => {
 
     const res = await markDelivered(admin, order.id);
     expect(res.status).toBe(409);
-    expect(mailer.sendMail).not.toHaveBeenCalled();
+    expect(deliveryMails()).toHaveLength(0);
 
     const after = await prisma.order.findUnique({
       where: { id: order.id },
@@ -333,7 +341,7 @@ describe('mark order as delivered', () => {
 
     const res = await markDelivered(admin, order.id);
     expect(res.status).toBe(409);
-    expect(mailer.sendMail).not.toHaveBeenCalled();
+    expect(deliveryMails()).toHaveLength(0);
 
     const after = await prisma.order.findUnique({
       where: { id: order.id },
@@ -371,7 +379,7 @@ describe('mark order as delivered', () => {
     const res = await markDelivered(admin, order.id);
     expect(res.status).toBe(200);
 
-    const html = (mailer.sendMail.mock.calls[0][0] as { html: string }).html;
+    const html = (deliveryMails()[0][0] as { html: string }).html;
     expect(html).not.toContain('<script>');
     expect(html).toContain('&lt;script&gt;');
   });
@@ -389,13 +397,13 @@ describe('delivery confirmation resend', () => {
       .set('X-CSRF-Token', admin.csrfToken)
       .send({});
     expect(res.status).toBe(409);
-    expect(mailer.sendMail).not.toHaveBeenCalled();
+    expect(deliveryMails()).toHaveLength(0);
   });
 
   it('sends a fresh confirmation on an explicit resend, without duplicating the automatic one', async () => {
     const { order, admin } = await paidOrder();
     await markDelivered(admin, order.id);
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(deliveryMails()).toHaveLength(1);
 
     const resend = await admin.agent
       .post(`/api/v1/admin/orders/${order.id}/delivery-confirmation/resend`)
@@ -403,11 +411,11 @@ describe('delivery confirmation resend', () => {
       .send({});
     expect(resend.status).toBe(200);
     expect(resend.body.data.status).toBe('SENT');
-    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+    expect(deliveryMails()).toHaveLength(2);
 
     // The automatic key is unaffected, so clicking "already delivered" again
     // still cannot add a third copy.
     await markDelivered(admin, order.id);
-    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+    expect(deliveryMails()).toHaveLength(2);
   });
 });

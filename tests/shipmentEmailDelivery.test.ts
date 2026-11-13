@@ -154,6 +154,17 @@ function saveShipment(admin: Authed, orderId: string, input: Record<string, unkn
     .send(input);
 }
 
+/**
+ * Mailer calls addressed to one recipient. A verified online payment also sends
+ * the admin/business new-order notification, so shipment assertions must count
+ * the customer's mail rather than every mailer call.
+ */
+function mailsTo(email: string) {
+  return mailer.sendMail.mock.calls.filter(
+    (call) => ((call[0] as { to?: string }).to ?? '').toLowerCase() === email.toLowerCase(),
+  );
+}
+
 const shipmentInput = {
   courierName: 'Delhivery',
   trackingNumber: 'DLV-EMAIL-1',
@@ -179,7 +190,7 @@ describe('shipment save reports email delivery truthfully', () => {
     expect(res.body.data.email.sent).toBe(true);
     expect(res.body.data.email.notificationId).toBeTruthy();
 
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(mailsTo(order.email)).toHaveLength(1);
 
     const { prisma } = await import('../src/lib/prisma.js');
     const notif = await prisma.shipmentNotification.findFirst({
@@ -200,7 +211,7 @@ describe('shipment save reports email delivery truthfully', () => {
     const token = res.body.data.shipment.trackingToken as string;
     expect(token).toBeTruthy();
 
-    const call = mailer.sendMail.mock.calls[0][0] as {
+    const call = mailsTo(order.email)[0][0] as {
       to: string;
       subject: string;
       html: string;
@@ -268,7 +279,7 @@ describe('shipment save reports email delivery truthfully', () => {
     expect(res.body.data.initialEmailSent).toBe(false);
     expect(res.body.data.email.status).toBe('NOT_CONFIGURED');
     // No send was even attempted.
-    expect(mailer.sendMail).not.toHaveBeenCalled();
+    expect(mailsTo(order.email)).toHaveLength(0);
 
     const { prisma } = await import('../src/lib/prisma.js');
     const notif = await prisma.shipmentNotification.findFirst({
@@ -288,13 +299,13 @@ describe('shipment save reports email delivery truthfully', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.email.status).toBe('NO_RECIPIENT');
     expect(res.body.data.email.sent).toBe(false);
-    expect(mailer.sendMail).not.toHaveBeenCalled();
+    expect(mailsTo(order.email)).toHaveLength(0);
   });
 
   it('sends an automatic UPDATE only when delivery details actually change', async () => {
     const { order, admin } = await paidOrder();
     await saveShipment(admin, order.id, shipmentInput);
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(mailsTo(order.email)).toHaveLength(1);
 
     // An identical re-save is a no-op: no event, no email.
     const same = await saveShipment(admin, order.id, shipmentInput);
@@ -302,7 +313,7 @@ describe('shipment save reports email delivery truthfully', () => {
     expect(same.body.data.changed).toBe(false);
     expect(same.body.data.emailKind).toBe('NONE');
     expect(same.body.data.email.status).toBe('SKIPPED');
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(mailsTo(order.email)).toHaveLength(1);
 
     // A real change emails the customer automatically.
     const second = await saveShipment(admin, order.id, { trackingNumber: 'DLV-EMAIL-2' });
@@ -310,19 +321,19 @@ describe('shipment save reports email delivery truthfully', () => {
     expect(second.body.data.changed).toBe(true);
     expect(second.body.data.emailKind).toBe('UPDATE');
     expect(second.body.data.email.status).toBe('SENT');
-    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
-    expect(mailer.sendMail.mock.calls[1][0].subject).toMatch(/update on your DRAFTOX order/i);
+    expect(mailsTo(order.email)).toHaveLength(2);
+    expect(mailsTo(order.email)[1][0].subject).toMatch(/update on your DRAFTOX order/i);
 
     // Repeating the same values never sends a duplicate.
     const repeat = await saveShipment(admin, order.id, { trackingNumber: 'DLV-EMAIL-2' });
     expect(repeat.body.data.changed).toBe(false);
-    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+    expect(mailsTo(order.email)).toHaveLength(2);
   });
 
   it('reuses one UPDATE outbox row when the same change is submitted concurrently', async () => {
     const { order, admin } = await paidOrder();
     await saveShipment(admin, order.id, shipmentInput);
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(mailsTo(order.email)).toHaveLength(1);
 
     const change = { trackingNumber: 'DLV-RACE-1', courierName: 'Delhivery' };
     const [a, b] = await Promise.all([
@@ -334,7 +345,7 @@ describe('shipment save reports email delivery truthfully', () => {
 
     // At most one additional email is sent, and the outbox never holds two
     // UPDATE rows for the same transition.
-    expect(mailer.sendMail.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(mailsTo(order.email).length).toBeLessThanOrEqual(2);
 
     const { prisma } = await import('../src/lib/prisma.js');
     const updates = await prisma.shipmentNotification.count({
@@ -433,7 +444,7 @@ describe('shipment email authorization', () => {
       .set('X-CSRF-Token', customer.csrfToken)
       .send(shipmentInput);
     expect(res.status).toBe(403);
-    expect(mailer.sendMail).not.toHaveBeenCalled();
+    expect(mailsTo(order.email)).toHaveLength(0);
   });
 });
 
@@ -504,7 +515,7 @@ describe('COD order tracking updates', () => {
       .set('X-CSRF-Token', admin.csrfToken)
       .send({ note: 'Out for delivery' });
     expect(res.status).toBe(409);
-    expect(mailer.sendMail).not.toHaveBeenCalled();
+    expect(mailsTo(order.email)).toHaveLength(0);
   });
 });
 
@@ -525,7 +536,7 @@ describe('safe retry and duplicate prevention', () => {
     expect(saved.body.data.email.status).toBe('FAILED');
     const notificationId = saved.body.data.email.notificationId as string;
     expect(notificationId).toBeTruthy();
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(mailsTo(order.email)).toHaveLength(1);
 
     // Retry succeeds.
     const retry = await admin.agent
@@ -533,14 +544,14 @@ describe('safe retry and duplicate prevention', () => {
       .set('X-CSRF-Token', admin.csrfToken);
     expect(retry.status).toBe(200);
     expect(retry.body.data.status).toBe('SENT');
-    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+    expect(mailsTo(order.email)).toHaveLength(2);
 
     // A second retry must NOT send a duplicate.
     const retryAgain = await admin.agent
       .post(`/api/v1/admin/notifications/${notificationId}/retry`)
       .set('X-CSRF-Token', admin.csrfToken);
     expect(retryAgain.body.data.status).toBe('ALREADY_SENT');
-    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+    expect(mailsTo(order.email)).toHaveLength(2);
 
     const { prisma } = await import('../src/lib/prisma.js');
     const notif = await prisma.shipmentNotification.findUnique({
@@ -554,7 +565,7 @@ describe('safe retry and duplicate prevention', () => {
   it('deduplicates explicit update emails that reuse an idempotency key', async () => {
     const { order, admin } = await paidOrder();
     await saveShipment(admin, order.id, shipmentInput);
-    expect(mailer.sendMail).toHaveBeenCalledTimes(1);
+    expect(mailsTo(order.email)).toHaveLength(1);
 
     const key = `idem_${Date.now()}_abcdef`;
     const first = await admin.agent
@@ -563,7 +574,7 @@ describe('safe retry and duplicate prevention', () => {
       .send({ note: 'Out for delivery', idempotencyKey: key });
     expect(first.status).toBe(200);
     expect(first.body.data.status).toBe('SENT');
-    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+    expect(mailsTo(order.email)).toHaveLength(2);
 
     const second = await admin.agent
       .post(`/api/v1/admin/orders/${order.id}/shipment/email`)
@@ -572,7 +583,7 @@ describe('safe retry and duplicate prevention', () => {
     expect(second.status).toBe(200);
     expect(second.body.data.status).toBe('ALREADY_SENT');
     // No duplicate email.
-    expect(mailer.sendMail).toHaveBeenCalledTimes(2);
+    expect(mailsTo(order.email)).toHaveLength(2);
 
     const { prisma } = await import('../src/lib/prisma.js');
     const updates = await prisma.shipmentNotification.count({

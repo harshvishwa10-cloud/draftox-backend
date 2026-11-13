@@ -145,6 +145,15 @@ async function saveShipment(admin: Authed, orderId: string, input: Record<string
     .send(input);
 }
 
+/**
+ * Shipment/tracking mail addressed to the customer. A verified online payment
+ * also sends the admin/business new-order notification, so these assertions
+ * must ignore the internal copies.
+ */
+function customerMails(order: OrderLike) {
+  return mailCalls.filter((call) => call.to === order.email);
+}
+
 /* ------------------------------------------------------------------ */
 /* Public tracking route                                                */
 /* ------------------------------------------------------------------ */
@@ -232,9 +241,9 @@ describe('initial shipment email (idempotent)', () => {
     expect(res.body.data.initialEmailSent).toBe(true);
 
     // An email was captured by the mock.
-    expect(mailCalls.length).toBe(1);
-    expect(mailCalls[0].to).toBe(order.email);
-    expect(mailCalls[0].subject).toMatch(/is on its way/i);
+    expect(customerMails(order).length).toBe(1);
+    expect(customerMails(order)[0].to).toBe(order.email);
+    expect(customerMails(order)[0].subject).toMatch(/is on its way/i);
 
     // The notification row exists and is marked SENT.
     const { prisma } = await import('../src/lib/prisma.js');
@@ -256,12 +265,12 @@ describe('initial shipment email (idempotent)', () => {
     const admin = await getAdminAgent(app);
 
     await saveShipment(admin, order.id, { courierName: 'Delhivery', trackingNumber: 'DLV-001' });
-    expect(mailCalls.length).toBe(1);
+    expect(customerMails(order).length).toBe(1);
 
     // A genuinely changed re-save should notify the customer of the update.
     await saveShipment(admin, order.id, { courierName: 'DTDC', trackingNumber: 'DTDC-002' });
-    expect(mailCalls.length).toBe(2);
-    expect(mailCalls[1].subject).toMatch(/update on your DRAFTOX order/i);
+    expect(customerMails(order).length).toBe(2);
+    expect(customerMails(order)[1].subject).toMatch(/update on your DRAFTOX order/i);
 
     const { prisma } = await import('../src/lib/prisma.js');
     const initialCount = await prisma.shipmentNotification.count({
@@ -287,7 +296,7 @@ describe('initial shipment email (idempotent)', () => {
     });
     expect(first.body.data.changed).toBe(true);
     expect(first.body.data.emailKind).toBe('INITIAL');
-    expect(mailCalls.length).toBe(1);
+    expect(customerMails(order).length).toBe(1);
 
     const second = await saveShipment(admin, order.id, {
       courierName: 'Delhivery',
@@ -298,7 +307,7 @@ describe('initial shipment email (idempotent)', () => {
     expect(second.body.data.emailKind).toBe('NONE');
     expect(second.body.data.email.status).toBe('SKIPPED');
     // An unchanged re-submit is a no-op: no duplicate email.
-    expect(mailCalls.length).toBe(1);
+    expect(customerMails(order).length).toBe(1);
   });
 });
 
@@ -319,7 +328,7 @@ describe('notification retry', () => {
       trackingNumber: 'DLV-RETRY',
     });
 
-    expect(mailCalls.length).toBe(1);
+    expect(customerMails(order).length).toBe(1);
 
     const { prisma } = await import('../src/lib/prisma.js');
     const notif = await prisma.shipmentNotification.findFirst({
@@ -337,7 +346,7 @@ describe('notification retry', () => {
     expect(retry.body.data.sent).toBe(false);
 
     // Still exactly one email: no duplicate.
-    expect(mailCalls.length).toBe(1);
+    expect(customerMails(order).length).toBe(1);
 
     const after = await prisma.shipmentNotification.findUnique({
       where: { id: notif!.id },
@@ -390,7 +399,7 @@ describe('send tracking update email', () => {
     });
 
     // After the initial save, there should be 1 email (the INITIAL).
-    expect(mailCalls.length).toBe(1);
+    expect(customerMails(order).length).toBe(1);
 
     const res = await admin.agent
       .post(`/api/v1/admin/orders/${order.id}/shipment/email`)
@@ -400,8 +409,8 @@ describe('send tracking update email', () => {
     expect(res.body.data.notificationId).toBeTruthy();
 
     // A second email was sent (the UPDATE).
-    expect(mailCalls.length).toBe(2);
-    const updateEmail = mailCalls[mailCalls.length - 1];
+    expect(customerMails(order).length).toBe(2);
+    const updateEmail = customerMails(order)[customerMails(order).length - 1];
     expect(updateEmail.to).toBe(order.email);
     expect(updateEmail.subject).toMatch(/Update on your DRAFTOX order/);
 

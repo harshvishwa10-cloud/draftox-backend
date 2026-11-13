@@ -1,7 +1,13 @@
 import { Prisma } from '@prisma/client';
 import { isMailerReady, sendMail } from '../../lib/mailer.js';
 import { logger } from '../../lib/logger.js';
-import { isTest, publicSiteUrl, brevoConfigured } from '../../config/env.js';
+import {
+  isTest,
+  publicSiteUrl,
+  brevoConfigured,
+  ownerNotificationEmail,
+  supportEmail,
+} from '../../config/env.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { prisma } from '../../lib/prisma.js';
 import {
@@ -246,9 +252,41 @@ ${input.bodyText}
 /* Admin / business new-order notification                             */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Human-safe label for an online payment method reported by Razorpay. The raw
+ * provider value (e.g. `upi`) is normalised for display; unknown methods still
+ * render sensibly instead of being dropped.
+ */
+export function onlinePaymentMethodLabel(method: string | null | undefined): string {
+  const value = (method ?? '').trim().toLowerCase();
+  switch (value) {
+    case 'upi':
+      return 'UPI (paid online)';
+    case 'card':
+      return 'Card (paid online)';
+    case 'netbanking':
+      return 'Netbanking (paid online)';
+    case 'wallet':
+      return 'Wallet (paid online)';
+    case 'emi':
+      return 'EMI (paid online)';
+    case 'paylater':
+      return 'Pay Later (paid online)';
+    default:
+      return 'Online payment (paid online)';
+  }
+}
+
 export function buildAdminOrderEmail(
   order: OrderEmailContext & { phone?: string | null; address?: unknown },
-  opts: { paymentMethodLabel: string; adminUrl?: string | null },
+  opts: {
+    paymentMethodLabel: string;
+    adminUrl?: string | null;
+    /** Order status shown to the store team (defaults to the COD wording). */
+    statusLabel?: string;
+    /** Closing note (defaults to the COD "pay on delivery" wording). */
+    note?: string;
+  },
 ): MailInput {
   const orderNo = order.orderNumber ?? 'N/A';
   const amount = Number(order.amount);
@@ -259,6 +297,10 @@ export function buildAdminOrderEmail(
   const deliveryText = deliveryFee > 0 ? formatCurrency(order.currency, deliveryFee) : 'Free';
   const createdAt = order.createdAt ? new Date(order.createdAt) : new Date();
   const dateText = createdAt.toLocaleString('en-IN', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const statusLabel = opts.statusLabel ?? 'CONFIRMED (Cash on Delivery)';
+  const note =
+    opts.note ??
+    'This is an automated notification. No online payment was taken — the customer will pay on delivery.';
 
   const addr = order.address as { line?: string; city?: string; state?: string; pincode?: string } | null | undefined;
   const addressText = addr
@@ -273,7 +315,7 @@ export function buildAdminOrderEmail(
     ...(order.phone ? [detailRow('Phone', order.phone)] : []),
     detailRow('Delivery address', addressText),
     detailRow('Payment method', opts.paymentMethodLabel),
-    detailRow('Order status', 'CONFIRMED (Cash on Delivery)'),
+    detailRow('Order status', statusLabel),
     detailRow('Subtotal', subtotalText),
     detailRow('Delivery', deliveryText),
     detailRow('Total payable', total),
@@ -289,7 +331,7 @@ ${details}
 <h2 style="margin:20px 0 6px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;font-weight:700;color:#0b1b33;">Items ordered</h2>
 ${itemsTable(order)}
 ${adminLink}
-<p style="margin:20px 0 0;color:#6b7280;font-size:13px;">This is an automated notification. No online payment was taken — the customer will pay on delivery.</p>`;
+<p style="margin:20px 0 0;color:#6b7280;font-size:13px;">${escapeHtml(note)}</p>`;
 
   return {
     to: '', // will be set by caller
@@ -307,7 +349,7 @@ Customer: ${order.name}
 Email: ${order.email}
 ${order.phone ? `Phone: ${order.phone}\n` : ''}Delivery address: ${addressText}
 Payment method: ${opts.paymentMethodLabel}
-Order status: CONFIRMED (Cash on Delivery)
+Order status: ${statusLabel}
 Subtotal: ${subtotalText}
 Delivery: ${deliveryText}
 Total payable: ${total}
@@ -315,11 +357,185 @@ Total payable: ${total}
 Items ordered:
 ${(order.items ?? []).map((i) => `${i.name} ×${i.qty} — ${formatCurrency(order.currency, i.lineTotal)}`).join('\n')}
 
-${opts.adminUrl ? `Open order in admin panel: ${opts.adminUrl}\n` : ''}
-This is an automated notification. No online payment was taken — the customer will pay on delivery.
+${opts.adminUrl ? `Open order in admin panel: ${opts.adminUrl}\n` : ''}${note}
 
 - The DRAFTOX team`,
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Paid online-order notification (after verified payment)             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Masks the local part of a recipient for logs (PII minimisation). Kept local
+ * so this module only depends on the mailer's send primitives — test doubles
+ * that mock `sendMail`/`isMailerReady` need no extra exports.
+ */
+function maskRecipient(address: string): string {
+  const at = address.indexOf('@');
+  if (at <= 0) return '***';
+  const local = address.slice(0, at);
+  const domain = address.slice(at + 1);
+  return `${local.slice(0, 2)}${'*'.repeat(Math.max(1, local.length - 2))}@${domain}`;
+}
+
+export interface PaidOrderNotificationResult {
+  recipient: string;
+  status: DeliveryStatus;
+  notificationId: string | null;
+  error: string | null;
+}
+
+/**
+ * Sends the store-owner (and business) new-order email for an order whose
+ * ONLINE payment has been verified. This is the online counterpart to the COD
+ * block in `createOrder`: it is called only after `markOrderPaid` (or an
+ * already-PAID transition) and never before, so a pending/failed payment can
+ * never produce a "new paid order" email.
+ *
+ * Best-effort and idempotent: the caller's order/payment result is never
+ * affected, each recipient has its own stable `admin-paid` / `business-paid`
+ * key, and a retried webhook or verification can never send a second copy.
+ * The recipient is always resolved from trusted server-side config.
+ */
+export async function dispatchPaidOrderNotifications(
+  orderId: string,
+): Promise<PaidOrderNotificationResult[]> {
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      select: {
+        id: true,
+        orderNumber: true,
+        email: true,
+        name: true,
+        phone: true,
+        items: true,
+        subtotal: true,
+        amount: true,
+        currency: true,
+        address: true,
+        createdAt: true,
+        paymentMethod: true,
+        status: true,
+      },
+    });
+    if (!order) return [];
+    // Defensive: only a genuinely PAID order may trigger a paid-order email.
+    if (order.status !== 'PAID') return [];
+
+    const customerEmail = (order.email ?? '').trim().toLowerCase();
+    const paymentMethodLabel = onlinePaymentMethodLabel(order.paymentMethod);
+    const mail = buildAdminOrderEmail(
+      { ...toOrderContext(order), phone: order.phone, address: order.address },
+      {
+        paymentMethodLabel,
+        adminUrl: `${publicSiteUrl}/admin/orders/${order.id}`,
+        statusLabel: 'PAID (online payment verified)',
+        note: `This is an automated notification. Payment of ${formatCurrency(
+          order.currency ?? 'INR',
+          Number(order.amount),
+        )} was verified online via Razorpay (${paymentMethodLabel}).`,
+      },
+    );
+
+    const targets: Array<{ recipient: string; keyPrefix: string }> = [];
+    const adminRecipient = ownerNotificationEmail?.trim();
+    if (adminRecipient) targets.push({ recipient: adminRecipient, keyPrefix: 'admin-paid' });
+    const businessRecipient = supportEmail?.trim();
+    if (businessRecipient) targets.push({ recipient: businessRecipient, keyPrefix: 'business-paid' });
+
+    const unique = targets.filter(
+      (target, index) =>
+        target.recipient.toLowerCase() !== customerEmail &&
+        targets.findIndex((t) => t.recipient.toLowerCase() === target.recipient.toLowerCase()) === index,
+    );
+
+    if (unique.length === 0) {
+      logger.warn('paid_order_notification_skipped_no_recipient', { orderId: order.id });
+      return [];
+    }
+
+    const settled = await Promise.allSettled(
+      unique.map(async ({ recipient, keyPrefix }) => {
+        const outcome = await sendOrderEmail({
+          orderId: order.id,
+          type: 'ORDER_CONFIRMED',
+          toEmail: recipient,
+          mail,
+          idempotencyKey: `${keyPrefix}:${order.id}:${recipient}`,
+        });
+        return {
+          recipient,
+          status: outcome.status,
+          notificationId: outcome.notificationId,
+          error: outcome.error,
+        } satisfies PaidOrderNotificationResult;
+      }),
+    );
+
+    const results: PaidOrderNotificationResult[] = settled.map((entry, index) => {
+      if (entry.status === 'fulfilled') return entry.value;
+      const target = unique[index];
+      const message = entry.reason instanceof Error ? entry.reason.message : String(entry.reason);
+      logger.warn('paid_order_notification_failed', {
+        orderId: order.id,
+        recipient: maskRecipient(target.recipient),
+        error: message,
+      });
+      return {
+        recipient: target.recipient,
+        status: 'FAILED',
+        notificationId: null,
+        error: message,
+      };
+    });
+
+    logger.info('paid_order_notification_dispatched', {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      results: results.map((r) => ({ recipient: maskRecipient(r.recipient), status: r.status })),
+    });
+    return results;
+  } catch (error) {
+    // Never let an email problem fail a verified payment/webhook transition.
+    logger.warn('paid_order_notification_failed', {
+      orderId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
+}
+
+/**
+ * In-flight dedupe for paid-order notifications. Verification, the webhook and
+ * the reconciliation job can all observe the same payment within a moment of
+ * each other; sharing one promise means they join a single dispatch instead of
+ * racing each other (and the outbox) for the same recipients.
+ */
+const paidOrderDispatchInFlight = new Map<string, Promise<PaidOrderNotificationResult[]>>();
+
+/**
+ * Public entry point used by the payment paths. Concurrent calls for the same
+ * order share the in-flight dispatch; once it settles, the entry is removed so
+ * a later retry (e.g. after an email outage) can try again. The stable outbox
+ * idempotency keys still guarantee a SENT notification is never repeated.
+ */
+export async function notifyPaidOrder(orderId: string): Promise<PaidOrderNotificationResult[]> {
+  const inFlight = paidOrderDispatchInFlight.get(orderId);
+  if (inFlight) return inFlight;
+
+  const pending = dispatchPaidOrderNotifications(orderId);
+  paidOrderDispatchInFlight.set(orderId, pending);
+  try {
+    return await pending;
+  } finally {
+    // Only clear our own entry: a newer dispatch must not be evicted here.
+    if (paidOrderDispatchInFlight.get(orderId) === pending) {
+      paidOrderDispatchInFlight.delete(orderId);
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -355,20 +571,39 @@ export async function sendOrderEmail(
     }
     rowId = existing.id;
   } else {
-    const created = await prisma.orderNotification.create({
-      data: {
-        orderId: params.orderId,
-        returnRequestId: params.returnRequestId ?? null,
-        type: params.type,
-        status: 'PENDING',
-        toEmail: recipient,
-        subject: params.mail.subject.slice(0, 200),
-        provider,
-        idempotencyKey: params.idempotencyKey,
-      },
-      select: { id: true },
-    });
-    rowId = created.id;
+    try {
+      const created = await prisma.orderNotification.create({
+        data: {
+          orderId: params.orderId,
+          returnRequestId: params.returnRequestId ?? null,
+          type: params.type,
+          status: 'PENDING',
+          toEmail: recipient,
+          subject: params.mail.subject.slice(0, 200),
+          provider,
+          idempotencyKey: params.idempotencyKey,
+        },
+        select: { id: true },
+      });
+      rowId = created.id;
+    } catch (err) {
+      // A concurrent replay (e.g. Razorpay retrying the same webhook) may have
+      // created this exact idempotency key first. Reuse its row instead of
+      // failing, and never send a second copy if it was already accepted.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const raced = await prisma.orderNotification.findUnique({
+          where: { idempotencyKey: params.idempotencyKey },
+          select: { id: true, status: true },
+        });
+        if (!raced) throw err;
+        if (raced.status === 'SENT') {
+          return { status: 'ALREADY_SENT', notificationId: raced.id, messageId: null, error: null };
+        }
+        rowId = raced.id;
+      } else {
+        throw err;
+      }
+    }
   }
 
   if (!recipient) {
@@ -385,15 +620,23 @@ export async function sendOrderEmail(
   }
 
   if (!isMailerReady) {
+    const notConfigured = 'Email delivery is not configured on the server.';
     logger.warn('order_mail_skipped_provider_not_configured', {
       orderId: params.orderId,
       notificationId: rowId,
+    });
+    // Persist the honest, retryable state. Leaving the row PENDING would imply
+    // a send is still in flight and make the missing delivery invisible to the
+    // admin retry tooling once SMTP is configured again.
+    await prisma.orderNotification.update({
+      where: { id: rowId },
+      data: { status: 'FAILED', error: notConfigured },
     });
     return {
       status: 'NOT_CONFIGURED',
       notificationId: rowId,
       messageId: null,
-      error: 'Email delivery is not configured on the server.',
+      error: notConfigured,
     };
   }
 
@@ -446,6 +689,8 @@ export async function retryOrderNotification(
           createdAt: true,
           phone: true,
           address: true,
+          status: true,
+          paymentMethod: true,
         },
       },
     },
@@ -474,11 +719,24 @@ export async function retryOrderNotification(
 
   let mail: MailInput;
   if (isInternalRecipient) {
+    const isPaid = row.order.status === 'PAID';
+    const paymentMethodLabel = isPaid
+      ? onlinePaymentMethodLabel(row.order.paymentMethod)
+      : 'Cash on Delivery';
     mail = buildAdminOrderEmail(
       { ...ctx, phone: row.order.phone, address: row.order.address },
       {
-        paymentMethodLabel: 'Cash on Delivery',
+        paymentMethodLabel,
         adminUrl: `${publicSiteUrl}/admin/orders/${row.orderId}`,
+        ...(isPaid
+          ? {
+              statusLabel: 'PAID (online payment verified)',
+              note: `This is an automated notification. Payment of ${formatCurrency(
+                ctx.currency,
+                Number(ctx.amount),
+              )} was verified online via Razorpay (${paymentMethodLabel}).`,
+            }
+          : {}),
       },
     );
     mail.to = recipient;

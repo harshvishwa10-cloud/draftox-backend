@@ -3,6 +3,7 @@ import { logger } from '../../lib/logger.js';
 import { razorpayConfigured } from '../../config/env.js';
 import { razorpayAuthHeader, toPaise } from './razorpay.js';
 import { markOrderPaid } from './orderPayment.js';
+import { notifyPaidOrder } from '../orders/orderEmails.js';
 import { recordPaymentException } from './exceptions.js';
 
 const RAZORPAY_API = 'https://api.razorpay.com/v1';
@@ -150,6 +151,10 @@ export async function reconcileOrderPayment(orderId: string): Promise<ReconcileR
     });
     return { status: 'mismatch', reason: 'duplicate_payment', paymentId: match.id };
   }
+
+  // Reconciliation just verified and recorded a captured payment — send the
+  // admin notification (idempotent, best-effort).
+  await notifyPaidOrder(order.id);
 
   logger.info('payment_reconciled', {
     orderId: order.id,

@@ -22,6 +22,7 @@ import {
   type RazorpayWebhookEvent,
 } from './razorpay.js';
 import { markOrderPaid } from './orderPayment.js';
+import { notifyPaidOrder } from '../orders/orderEmails.js';
 import { recordPaymentException } from './exceptions.js';
 
 const RAZORPAY_API = 'https://api.razorpay.com/v1';
@@ -221,6 +222,11 @@ async function processWebhookEvent(
           throw err;
         }
       }
+      // Already paid (possibly via the verify endpoint). Send the admin
+      // notification idempotently: a replay can never produce a second copy,
+      // and an order paid before this hook existed is repaired on the next
+      // duplicate webhook.
+      await notifyPaidOrder(order.id);
       return { handled: true, outcome: 'PROCESSED' };
     }
 
@@ -239,6 +245,9 @@ async function processWebhookEvent(
       });
       return { handled: false, outcome: 'IGNORED', reason: 'duplicate_payment' };
     }
+    // Verified payment transitioned this order to PAID — notify the store team
+    // exactly once (idempotent per order/recipient).
+    await notifyPaidOrder(order.id);
     return { handled: true, outcome: 'PROCESSED' };
   }
 
@@ -384,6 +393,10 @@ export const verifyRazorpayPayment = asyncHandler(async (req: Request, res: Resp
   }
 
   if (order.status === 'PAID') {
+    // Idempotent repair path: if the admin notification was never sent for this
+    // already-paid order (e.g. it was paid before the hook existed), the retry
+    // sends exactly one copy. Never blocks or changes the payment result.
+    await notifyPaidOrder(order.id);
     res.status(200).json({ success: true, data: { order, status: 'PAID', alreadyPaid: true } });
     return;
   }
@@ -422,6 +435,9 @@ export const verifyRazorpayPayment = asyncHandler(async (req: Request, res: Resp
     // A verified payment that belongs to a different order must never be applied.
     throw ApiError.conflict('This payment id is already recorded on a different order');
   }
+  // Payment is verified/captured and the order is PAID — notify the store team.
+  // Best-effort: the order/payment result is never affected by email failure.
+  await notifyPaidOrder(order.id);
   const updated = await prisma.order.findUnique({ where: { id: order.id }, select: orderSelect });
   res.status(200).json({ success: true, data: { order: updated, status: 'PAID' } });
 });
